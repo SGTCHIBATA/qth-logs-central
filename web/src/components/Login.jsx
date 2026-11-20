@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { ShieldCheck, Lock, Mail, AlertCircle } from 'lucide-react'
+import { ShieldCheck, Lock, User, AlertCircle, Info } from 'lucide-react'
 
 export default function Login() {
-  const [email, setEmail] = useState('')
+  const [identificador, setIdentificador] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [erro, setErro] = useState('')
@@ -13,8 +13,19 @@ export default function Login() {
     setErro('')
     setLoading(true)
 
+    const { data: emailResolvido, error: rpcError } = await supabase.rpc(
+      'resolver_email_login',
+      { identificador: identificador.trim() }
+    )
+
+    if (rpcError || !emailResolvido) {
+      setErro('Credenciais inválidas ou usuário inativo.')
+      setLoading(false)
+      return
+    }
+
     const { error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
+      email: emailResolvido,
       password,
     })
 
@@ -42,17 +53,17 @@ export default function Login() {
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
             <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-              E-MAIL OPERACIONAL
+              NOME COMPLETO, CPF OU MATRÍCULA
             </label>
             <div className="relative">
-              <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
-                type="email"
+                type="text"
                 required
-                autoComplete="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="usuario@ciuenp.pr.gov.br"
+                autoComplete="username"
+                value={identificador}
+                onChange={(e) => setIdentificador(e.target.value)}
+                placeholder="Digite seu nome, CPF ou matrícula"
                 className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg pl-9 pr-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-qth-orange transition-colors"
               />
             </div>
@@ -74,6 +85,13 @@ export default function Login() {
                 className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg pl-9 pr-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-qth-orange transition-colors"
               />
             </div>
+          </div>
+
+          <div className="flex items-start gap-2 bg-slate-800/70 border border-slate-700 text-slate-300 text-[11px] p-2.5 rounded-lg">
+            <Info className="w-4 h-4 text-qth-orange shrink-0 mt-0.5" />
+            <span>
+              <strong>Primeiro acesso:</strong> a senha inicial corresponde ao seu número de matrícula precedido de <strong>@</strong> (ex: <strong>@49300</strong>).
+            </span>
           </div>
 
           {erro && (
