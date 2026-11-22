@@ -2,7 +2,41 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { registrarAuditoria, registrarAlteracoesEmLote } from '../lib/auditoria'
 import SelectPesquisavel from './SelectPesquisavel'
+import BlocoLocalizacaoRapida from './BlocoLocalizacaoRapida'
+import FormNovaOcorrencia from './FormNovaOcorrencia'
+import BlocoRecursosRegulador from './BlocoRecursosRegulador'
 import cidadesData from '../data/cidades.json'
+import {
+    PRIORIDADES,
+    CORES_START,
+    CORES_VAZIAS,
+    SUB_ABAS_STATUS,
+    STATUS_OCORRENCIA_OPCOES,
+    NATUREZAS_ATENDIMENTO,
+    TIPOS_LOCAL,
+    TIPOS_VIA,
+    TIPOS_IDADE,
+    SEXOS_PACIENTE,
+    CLASSIFICACOES_RISCO,
+    RECURSOS_INDICADOS,
+    CODIGOS_J,
+    CODIGOS_QTA,
+    STATUS_EMPENHO_VTR,
+    FORM_NOVA_OCORRENCIA,
+    normalizarCoresVtr,
+    somarCoresVtr,
+    normalizarPacientesVtr,
+    inferirStatusPorHorario,
+    obterGrupoDisponibilidadeVtr,
+    obterEstiloRecursoMiniPainel,
+    criarFormInicialPerfil,
+    extrairLatLngDeTexto,
+    construirUrlRota,
+    obterMetaPrioridade,
+    formatarEnderecoOcorrencia,
+    obterCidadePrincipal,
+    calcularBalancoVitimas,
+} from '../utils/painelCentralHelpers'
 import {
     Radio,
     Plus,
@@ -22,533 +56,13 @@ import {
     Save,
     Send,
     Trash2,
-    Compass,
     Navigation,
-    Loader2,
     ShieldAlert,
     UserPlus,
     FileText,
     Layers,
 } from 'lucide-react'
 
-const PRIORIDADES = [
-    {
-        id: 'BAIXA',
-        label: 'BAIXA',
-        badge: 'bg-sky-500/20 text-sky-300 border-sky-400/50',
-        card: 'border-slate-700/80 hover:border-sky-500/60',
-        btnAtivo: 'bg-sky-600 text-white border-sky-400',
-    },
-    {
-        id: 'MEDIA',
-        label: 'MÉDIA',
-        badge: 'bg-qth-yellow/20 text-yellow-300 border-qth-yellow/50',
-        card: 'border-qth-yellow/50 hover:border-qth-yellow',
-        btnAtivo: 'bg-yellow-500 text-black border-yellow-300',
-    },
-    {
-        id: 'ALTA',
-        label: 'ALTA',
-        badge: 'bg-qth-orange/25 text-orange-300 border-qth-orange',
-        card: 'border-qth-orange/80 hover:border-qth-orange',
-        btnAtivo: 'bg-qth-orange text-white border-orange-300',
-    },
-    {
-        id: 'CRITICA',
-        label: 'CRÍTICA / EMERGÊNCIA',
-        badge: 'bg-qth-red/30 text-red-200 border-qth-red animate-pulse',
-        card: 'border-qth-red bg-qth-red/10 shadow-lg shadow-qth-red/15 hover:border-red-400',
-        btnAtivo: 'bg-qth-red text-white border-red-300',
-    },
-]
-
-const CORES_START = [
-    {
-        id: 'VERMELHO',
-        label: 'VERMELHO',
-        chip: 'bg-red-600/25 text-red-200 border-red-500/60',
-        btn: 'bg-red-600 hover:bg-red-500 text-white',
-    },
-    {
-        id: 'AMARELO',
-        label: 'AMARELO',
-        chip: 'bg-yellow-500/20 text-yellow-200 border-yellow-400/60',
-        btn: 'bg-yellow-500 hover:bg-yellow-400 text-black',
-    },
-    {
-        id: 'VERDE',
-        label: 'VERDE',
-        chip: 'bg-emerald-600/25 text-emerald-200 border-emerald-500/60',
-        btn: 'bg-emerald-600 hover:bg-emerald-500 text-white',
-    },
-    {
-        id: 'PRETO',
-        label: 'PRETO',
-        chip: 'bg-slate-700/60 text-slate-200 border-slate-500/60',
-        btn: 'bg-slate-700 hover:bg-slate-600 text-white',
-    },
-]
-
-const CORES_VAZIAS = {
-    VERMELHO: 0,
-    AMARELO: 0,
-    VERDE: 0,
-    PRETO: 0,
-}
-
-const SUB_ABAS_STATUS = [
-    { id: 'RESUMO_GERAL', label: 'RESUMO GERAL' },
-    { id: 'PENDENTE', label: 'PENDENTES' },
-    { id: 'DESPACHADA', label: 'DESPACHADAS' },
-    { id: 'EM_ANDAMENTO', label: 'EM ANDAMENTO' },
-    { id: 'FINALIZADA', label: 'FINALIZADAS' },
-    { id: 'CANCELADA', label: 'CANCELADAS / QTA' },
-]
-
-const STATUS_OCORRENCIA_OPCOES = [
-    'PENDENTE',
-    'DESPACHADA',
-    'EM_ANDAMENTO',
-    'FINALIZADA',
-    'CANCELADA',
-]
-
-const NATUREZAS_ATENDIMENTO = ['PRIMÁRIO', 'TRANSFERÊNCIA']
-const TIPOS_LOCAL = ['DOMICÍLIO', 'VIA PÚBLICA', 'ESTABELECIMENTO']
-const TIPOS_VIA = ['Urbana', 'Rodovia/Rural']
-const TIPOS_IDADE = ['Anos', 'Meses', 'Dias']
-const SEXOS_PACIENTE = ['Masculino', 'Feminino']
-const CLASSIFICACOES_RISCO = ['AZUL', 'VERDE', 'AMARELO', 'LARANJA', 'VERMELHO']
-const RECURSOS_INDICADOS = [
-    'USB',
-    'USA',
-    'MOTOLANCIA',
-    'AEROMEDICO',
-    'APOIO / DEFESA CIVIL',
-    'ORIENTAÇÃO MÉDICA',
-]
-
-const CODIGOS_J = [
-    'J01 - SEM VÍTIMA NO LOCAL',
-    'J02 - RECUSA DE ATENDIMENTO / REMOÇÃO',
-    'J03 - ATENDIDO NO LOCAL SEM REMOÇÃO',
-    'J04 - REMOÇÃO PARA UNIDADE DE SAÚDE',
-    'J05 - ÓBITO NO LOCAL',
-    'J06 - ÓBITO DURANTE ATENDIMENTO / TRANSPORTE',
-    'J11 - OCORRÊNCIA CANCELADA / DISPENSADA',
-]
-
-const CODIGOS_QTA = [
-    'QTA - SEM ALTERAÇÃO / NADA CONSTATADO',
-    'QTA 01 - DISPENSADO PELO SOLICITANTE',
-    'QTA 02 - ENDEREÇO NÃO LOCALIZADO',
-    'QTA 03 - ATENDIDO POR OUTRO RECURSO',
-    'QTA 04 - TROTE / CHAMADO INDEVIDO',
-]
-
-const STATUS_EMPENHO_VTR = [
-    'ACIONADA',
-    'EMPENHADA',
-    'QTI',
-    'NO QTH',
-    'QTI UNIDADE SAUDE',
-    'NA UNIDADE SAUDE',
-    'QTI BASE QAP',
-    'QTA',
-]
-
-const FORM_NOVA_OCORRENCIA = {
-    numero_ocorrencia: '',
-    prioridade: 'MEDIA',
-    solicitante_nome: '',
-    solicitante_telefone: '',
-    numero_vitimas: '1',
-    tipo_atendimento: 'PRIMÁRIO',
-    tipo_local: 'DOMICÍLIO',
-    tipo_via: 'Urbana',
-    coordenadas: '',
-    latitude: null,
-    longitude: null,
-    link_localizacao: '',
-    via1: '',
-    via2: '',
-    numero_end: '',
-    bairro: '',
-    ponto_referencia: '',
-    estado: 'PR',
-    cidade_urb: '',
-    rodovia_jurisdicao: '',
-    rodovia_codigo: '',
-    rodovia_km: '',
-    rodovia_uf: 'PR',
-    rodovia_cidade: '',
-    origem_instituicao: '',
-    origem_rua: '',
-    origem_numero: '',
-    origem_bairro: '',
-    origem_uf: 'PR',
-    origem_cidade: '',
-    destino_instituicao: '',
-    destino_rua: '',
-    destino_numero: '',
-    destino_bairro: '',
-    destino_uf: 'PR',
-    destino_cidade: '',
-    motivo: '',
-}
-
-const NOME_PARA_UF = {
-    ACRE: 'AC',
-    ALAGOAS: 'AL',
-    AMAPA: 'AP',
-    AMAZONAS: 'AM',
-    BAHIA: 'BA',
-    CEARA: 'CE',
-    'DISTRITO FEDERAL': 'DF',
-    'ESPIRITO SANTO': 'ES',
-    GOIAS: 'GO',
-    MARANHAO: 'MA',
-    'MATO GROSSO': 'MT',
-    'MATO GROSSO DO SUL': 'MS',
-    'MINAS GERAIS': 'MG',
-    PARA: 'PA',
-    PARAIBA: 'PB',
-    PARANA: 'PR',
-    PERNAMBUCO: 'PE',
-    PIAUI: 'PI',
-    'RIO DE JANEIRO': 'RJ',
-    'RIO GRANDE DO NORTE': 'RN',
-    'RIO GRANDE DO SUL': 'RS',
-    RONDONIA: 'RO',
-    RORAIMA: 'RR',
-    'SANTA CATARINA': 'SC',
-    'SAO PAULO': 'SP',
-    SERGIPE: 'SE',
-    TOCANTINS: 'TO',
-}
-
-function normalizarCoresVtr(raw) {
-    let obj = raw
-    if (typeof raw === 'string') {
-        try {
-            obj = JSON.parse(raw)
-        } catch {
-            obj = {}
-        }
-    }
-    return {
-        VERMELHO: Math.max(0, parseInt(obj?.VERMELHO, 10) || 0),
-        AMARELO: Math.max(0, parseInt(obj?.AMARELO, 10) || 0),
-        VERDE: Math.max(0, parseInt(obj?.VERDE, 10) || 0),
-        PRETO: Math.max(0, parseInt(obj?.PRETO, 10) || 0),
-    }
-}
-
-function somarCoresVtr(cores) {
-    const c = normalizarCoresVtr(cores)
-    return c.VERMELHO + c.AMARELO + c.VERDE + c.PRETO
-}
-
-function normalizarPacientesVtr(raw) {
-    let lista = raw
-    if (typeof raw === 'string') {
-        try {
-            lista = JSON.parse(raw)
-        } catch {
-            lista = []
-        }
-    }
-    if (!Array.isArray(lista)) return []
-    return lista.map((p, idx) => ({
-        id: p.id || `pac-${idx}-${Date.now()}`,
-        nome: p.nome || `PACIENTE ${idx + 1}`,
-        idade: p.idade || '',
-        tipo_idade: p.tipo_idade || '',
-        sexo: p.sexo || '',
-        cor_start: p.cor_start || '',
-        destino: p.destino || '',
-        quadro_clinico: p.quadro_clinico || '',
-        evolucoes: Array.isArray(p.evolucoes) ? p.evolucoes : [],
-    }))
-}
-
-function inferirStatusPorHorario(chaveHorario, valorHorario, statusAtual = '') {
-    if (!valorHorario || !String(valorHorario).trim()) {
-        return statusAtual || 'ACIONADA'
-    }
-    const mapa = {
-        h_acionamento: 'ACIONADA',
-        h_saida_base: 'QTI',
-        h_chegada_qth: 'NO QTH',
-        h_saida_qth: 'QTI UNIDADE SAUDE',
-        h_chegada_saude: 'NA UNIDADE SAUDE',
-        h_saida_saude: 'EM ANDAMENTO',
-        h_encerramento: 'QTI BASE QAP',
-    }
-    return mapa[chaveHorario] || statusAtual || 'ACIONADA'
-}
-
-// Ordem decrescente: 0 = Disponíveis, 1 = Empenhados e afins, 2 = Baixados e afins
-function obterGrupoDisponibilidadeVtr(statusRaw) {
-    const st = (statusRaw || 'DISPONIVEL').toUpperCase().trim()
-    if (['DISPONIVEL', 'DISPONÍVEL', 'QAP', 'LIVRE', 'PRONTA'].includes(st)) {
-        return 0
-    }
-    if (
-        [
-            'BAIXADA',
-            'BAIXADO',
-            'MANUTENCAO',
-            'MANUTENÇÃO',
-            'INATIVA',
-            'INATIVO',
-            'INDISPONIVEL',
-            'INDISPONÍVEL',
-            'QTA',
-            'FORA DE OPERACAO',
-            'FORA DE OPERAÇÃO',
-        ].includes(st)
-    ) {
-        return 2
-    }
-    return 1
-}
-
-function obterEstiloRecursoMiniPainel(statusRaw) {
-    const grupo = obterGrupoDisponibilidadeVtr(statusRaw)
-    if (grupo === 0) {
-        return {
-            rowClass: 'bg-emerald-950/40 border-emerald-500/50 text-emerald-200',
-            pillClass: 'bg-emerald-600/30 text-emerald-200 border-emerald-400/50',
-        }
-    }
-    if (grupo === 2) {
-        return {
-            rowClass: 'bg-red-950/35 border-red-500/50 text-red-200 opacity-85',
-            pillClass: 'bg-red-600/30 text-red-200 border-red-400/50',
-        }
-    }
-    return {
-        rowClass: 'bg-amber-950/35 border-qth-yellow/50 text-yellow-100',
-        pillClass: 'bg-qth-yellow/25 text-yellow-200 border-qth-yellow/50',
-    }
-}
-
-function criarFormInicialPerfil(perfil) {
-    const partesLotacao = (perfil?.municipio_lotacao || '').split(' - ')
-    const cidadeLotacao = (partesLotacao[0] || '').trim().toUpperCase()
-    const ufLotacao = (partesLotacao[1] || 'PR').trim().toUpperCase() || 'PR'
-    return {
-        ...FORM_NOVA_OCORRENCIA,
-        estado: ufLotacao,
-        rodovia_uf: ufLotacao,
-        origem_uf: ufLotacao,
-        destino_uf: ufLotacao,
-        cidade_urb: cidadeLotacao,
-        rodovia_cidade: cidadeLotacao,
-        origem_cidade: cidadeLotacao,
-    }
-}
-
-function normalizarSemAcento(texto) {
-    return (texto || '')
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .toUpperCase()
-        .trim()
-}
-
-function extrairLatLngDeTexto(texto) {
-    if (!texto) return null
-    const limpo = texto.trim()
-
-    const dmsRegex =
-        /(\d{1,3})[°º]\s*(\d{1,2})['′]\s*(\d{1,2}(?:[.,]\d+)?)["″]?\s*([NSns])\s*[,;\s]+\s*(\d{1,3})[°º]\s*(\d{1,2})['′]\s*(\d{1,2}(?:[.,]\d+)?)["″]?\s*([EWewOo])/
-    const mDms = limpo.match(dmsRegex)
-    if (mDms) {
-        const latDeg = parseFloat(mDms[1])
-        const latMin = parseFloat(mDms[2])
-        const latSec = parseFloat(mDms[3].replace(',', '.'))
-        const latSign = mDms[4].toUpperCase() === 'S' ? -1 : 1
-
-        const lngDeg = parseFloat(mDms[5])
-        const lngMin = parseFloat(mDms[6])
-        const lngSec = parseFloat(mDms[7].replace(',', '.'))
-        const lngHem = mDms[8].toUpperCase()
-        const lngSign = lngHem === 'W' || lngHem === 'O' ? -1 : 1
-
-        const lat = latSign * (latDeg + latMin / 60 + latSec / 3600)
-        const lng = lngSign * (lngDeg + lngMin / 60 + lngSec / 3600)
-        if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-            return { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) }
-        }
-    }
-
-    const m3d4d = limpo.match(/!3d(-?\d{1,2}\.\d+)!4d(-?\d{1,3}\.\d+)/)
-    if (m3d4d) {
-        const lat = parseFloat(m3d4d[1])
-        const lng = parseFloat(m3d4d[2])
-        if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-            return { lat, lng }
-        }
-    }
-
-    const decRegex = /(-?\d{1,2}\.\d{3,})\s*[,;\s/]+\s*(-?\d{1,3}\.\d{3,})/
-    const mDec = limpo.match(decRegex)
-    if (mDec) {
-        const lat = parseFloat(mDec[1])
-        const lng = parseFloat(mDec[2])
-        if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-            return { lat, lng }
-        }
-    }
-
-    return null
-}
-
-function construirUrlRota(oc) {
-    if (!oc) return null
-
-    const coordsExtraidas =
-        oc.latitude != null && oc.longitude != null
-            ? { lat: oc.latitude, lng: oc.longitude }
-            : extrairLatLngDeTexto(oc.coordenadas) || extrairLatLngDeTexto(oc.link_localizacao)
-
-    if (coordsExtraidas) {
-        return `https://www.google.com/maps/dir/?api=1&destination=${coordsExtraidas.lat},${coordsExtraidas.lng}`
-    }
-
-    if (oc.link_localizacao && /^https?:\/\//i.test(oc.link_localizacao.trim())) {
-        return oc.link_localizacao.trim()
-    }
-
-    if ((oc.tipo_atendimento || '').toUpperCase() === 'TRANSFERÊNCIA') {
-        const orig = [
-            oc.origem_instituicao,
-            oc.origem_rua,
-            oc.origem_numero,
-            oc.origem_cidade,
-            oc.origem_uf,
-        ]
-            .filter(Boolean)
-            .join(', ')
-        const dest = [
-            oc.destino_instituicao,
-            oc.destino_rua,
-            oc.destino_numero,
-            oc.destino_cidade,
-            oc.destino_uf,
-        ]
-            .filter(Boolean)
-            .join(', ')
-        if (dest) {
-            const wp = orig ? `&waypoints=${encodeURIComponent(orig)}` : ''
-            return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}${wp}`
-        }
-        return null
-    }
-
-    if (oc.tipo_via === 'Rodovia/Rural') {
-        const rod = [
-            oc.rodovia_jurisdicao && oc.rodovia_codigo
-                ? `${oc.rodovia_jurisdicao}-${oc.rodovia_codigo}`
-                : oc.rodovia_jurisdicao || oc.rodovia_codigo,
-            oc.rodovia_km && `km ${oc.rodovia_km}`,
-            oc.rodovia_cidade,
-            oc.rodovia_uf,
-        ]
-            .filter(Boolean)
-            .join(', ')
-        return rod ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(rod)}` : null
-    }
-
-    const urb = [
-        oc.via1 && oc.via2 ? `${oc.via1} com ${oc.via2}` : oc.via1,
-        oc.numero_end,
-        oc.bairro,
-        oc.cidade_urb,
-        oc.estado,
-    ]
-        .filter(Boolean)
-        .join(', ')
-
-    return urb ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(urb)}` : null
-}
-
-function obterMetaPrioridade(prioridade) {
-    const p = (prioridade || 'MEDIA').toUpperCase()
-    return PRIORIDADES.find((item) => item.id === p) || PRIORIDADES[1]
-}
-
-function formatarEnderecoOcorrencia(oc) {
-    const geoExtra = []
-    if (oc.coordenadas) geoExtra.push(`GPS: ${oc.coordenadas}`)
-    else if (oc.latitude != null && oc.longitude != null) {
-        geoExtra.push(`GPS: ${oc.latitude}, ${oc.longitude}`)
-    }
-    if (oc.link_localizacao) geoExtra.push('LINK MAPS ANEXADO')
-
-    if ((oc.tipo_atendimento || '').toUpperCase() === 'TRANSFERÊNCIA') {
-        const orig = [
-            oc.origem_instituicao,
-            oc.origem_rua && `${oc.origem_rua}${oc.origem_numero ? `, ${oc.origem_numero}` : ''}`,
-            oc.origem_bairro,
-            oc.origem_cidade && `${oc.origem_cidade} - ${oc.origem_uf || 'PR'}`,
-        ]
-            .filter(Boolean)
-            .join(', ')
-        const dest = [
-            oc.destino_instituicao,
-            oc.destino_rua && `${oc.destino_rua}${oc.destino_numero ? `, ${oc.destino_numero}` : ''}`,
-            oc.destino_bairro,
-            oc.destino_cidade && `${oc.destino_cidade} - ${oc.origem_uf || 'PR'}`,
-        ]
-            .filter(Boolean)
-            .join(', ')
-        return `${orig || 'ORIGEM N/I'} ➔ ${dest || 'DESTINO N/I'}`
-    }
-
-    if (oc.tipo_via === 'Rodovia/Rural') {
-        const rod = [
-            oc.rodovia_jurisdicao && oc.rodovia_codigo
-                ? `${oc.rodovia_jurisdicao}-${oc.rodovia_codigo}`
-                : oc.rodovia_jurisdicao || oc.rodovia_codigo,
-            oc.rodovia_km && `KM ${oc.rodovia_km}`,
-            oc.ponto_referencia && `REF: ${oc.ponto_referencia}`,
-            oc.rodovia_cidade && `${oc.rodovia_cidade} - ${oc.rodovia_uf || 'PR'}`,
-            ...geoExtra,
-        ]
-            .filter(Boolean)
-            .join(' • ')
-        return rod || 'RODOVIA / ÁREA RURAL'
-    }
-
-    const viaPrincipal =
-        oc.via1 && oc.via2
-            ? `${oc.via1} C/ ${oc.via2}`
-            : oc.via1
-    const urb = [
-        viaPrincipal && `${viaPrincipal}${oc.numero_end ? `, ${oc.numero_end}` : ''}`,
-        oc.bairro,
-        oc.ponto_referencia && `REF: ${oc.ponto_referencia}`,
-        oc.cidade_urb && `${oc.cidade_urb} - ${oc.estado || 'PR'}`,
-        ...geoExtra,
-    ]
-        .filter(Boolean)
-        .join(' • ')
-
-    return urb || 'ENDEREÇO NÃO INFORMADO'
-}
-
-function obterCidadePrincipal(oc) {
-    if ((oc.tipo_atendimento || '').toUpperCase() === 'TRANSFERÊNCIA') {
-        return (oc.origem_cidade || oc.destino_cidade || '').toUpperCase()
-    }
-    if (oc.tipo_via === 'Rodovia/Rural') {
-        return (oc.rodovia_cidade || '').toUpperCase()
-    }
-    return (oc.cidade_urb || '').toUpperCase()
-}
 
 export default function PainelCentral({ perfil }) {
     const cargo = (perfil?.cargo || '').toUpperCase()
@@ -616,8 +130,6 @@ export default function PainelCentral({ perfil }) {
     }))
     const [criandoOcorrencia, setCriandoOcorrencia] = useState(false)
     const [erroNova, setErroNova] = useState('')
-    const [buscandoGeoNova, setBuscandoGeoNova] = useState(false)
-    const [avisoGeoNova, setAvisoGeoNova] = useState('')
 
     useEffect(() => {
         try {
@@ -671,8 +183,6 @@ export default function PainelCentral({ perfil }) {
     }, [ocorrenciaSelecionadaId, abaInterna, chaveModalAberto])
 
     const [editTarm, setEditTarm] = useState(null)
-    const [buscandoGeoEdit, setBuscandoGeoEdit] = useState(false)
-    const [avisoGeoEdit, setAvisoGeoEdit] = useState('')
     const [editRegulador, setEditRegulador] = useState(null)
     const [editRadio, setEditRadio] = useState(null)
     const [novaEvolucaoTexto, setNovaEvolucaoTexto] = useState('')
@@ -810,6 +320,74 @@ export default function PainelCentral({ perfil }) {
         }
     }
 
+    function normalizarRecursosSolicitados(raw) {
+        if (!Array.isArray(raw)) return []
+        return raw.map((item, idx) => ({
+            id: item?.id || `req-${idx}`,
+            recurso: (item?.recurso || '').toUpperCase(),
+            quantidade: Math.max(1, parseInt(item?.quantidade, 10) || 1),
+            paciente_id: item?.paciente_id || '',
+            paciente_nome: (item?.paciente_nome || '').toUpperCase(),
+            paciente_info: (item?.paciente_info || '').toUpperCase(),
+            observacao: (item?.observacao || '').toUpperCase(),
+        }))
+    }
+
+    const pacientesDisponiveisRegulador = useMemo(() => {
+        const lista = []
+        const vistos = new Set()
+
+        if (ocorrenciaSelecionada?.nome_paciente) {
+            const nomeBase = ocorrenciaSelecionada.nome_paciente.trim().toUpperCase()
+            const detalheBase = [
+                nomeBase,
+                ocorrenciaSelecionada.idade_paciente
+                    ? `${ocorrenciaSelecionada.idade_paciente}${ocorrenciaSelecionada.tipo_idade_paciente ? ` ${ocorrenciaSelecionada.tipo_idade_paciente}` : ''}`
+                    : '',
+                ocorrenciaSelecionada.sexo_paciente || '',
+            ]
+                .filter(Boolean)
+                .join(' • ')
+
+            if (!vistos.has(detalheBase)) {
+                vistos.add(detalheBase)
+                lista.push({
+                    id: 'oc-paciente-principal',
+                    nome: nomeBase,
+                    resumo: detalheBase,
+                    valor: detalheBase,
+                })
+            }
+        }
+
+        for (const emp of empenhosDaOcorrencia || []) {
+            const pacs = normalizarPacientesVtr(emp.pacientes_detalhes)
+            pacs.forEach((pac, i) => {
+                const nomePac = (pac.nome || `PACIENTE #${i + 1}`).toUpperCase()
+                const resumoPac = [
+                    `${emp.prefixo}: ${nomePac}`,
+                    pac.idade ? `${pac.idade}${pac.tipo_idade ? ` ${pac.tipo_idade}` : ''}` : '',
+                    pac.cor_start ? `START ${pac.cor_start}` : '',
+                    pac.destino ? `DEST: ${pac.destino}` : '',
+                ]
+                    .filter(Boolean)
+                    .join(' • ')
+
+                if (!vistos.has(resumoPac)) {
+                    vistos.add(resumoPac)
+                    lista.push({
+                        id: pac.id,
+                        nome: nomePac,
+                        resumo: resumoPac,
+                        valor: resumoPac,
+                    })
+                }
+            })
+        }
+
+        return lista
+    }, [ocorrenciaSelecionada, empenhosDaOcorrencia])
+
     function atualizarDraftVtr(empId, empBase, patch) {
         setRascunhosVtr((prev) => {
             const atual = prev[empId] || {
@@ -842,10 +420,10 @@ export default function PainelCentral({ perfil }) {
 
     function popularFormulariosModal(oc) {
         setEditTarm({ ...oc })
-        setAvisoGeoEdit('')
         setEditRegulador({
             prioridade: oc.prioridade || 'MEDIA',
             protocolo_imv: Boolean(oc.protocolo_imv),
+            recursos_solicitados: normalizarRecursosSolicitados(oc.recursos_solicitados),
             numero_vitimas: Math.max(1, parseInt(oc.numero_vitimas, 10) || 1),
             vitimas_meios_proprios: Math.max(0, parseInt(oc.vitimas_meios_proprios, 10) || 0),
             vitimas_terceiros: Math.max(0, parseInt(oc.vitimas_terceiros, 10) || 0),
@@ -876,241 +454,6 @@ export default function PainelCentral({ perfil }) {
         }
     }, [ocorrenciaSelecionadaId, ocorrenciaSelecionada])
 
-    async function executarPreenchimentoPorGeo(dadosAtuais, setDadosFn, setLoadingFn, setAvisoFn) {
-        setAvisoFn('')
-        const coordStr = (dadosAtuais.coordenadas || '').trim()
-        const linkStr = (dadosAtuais.link_localizacao || '').trim()
-
-        if (!coordStr && !linkStr) {
-            setAvisoFn('Informe coordenadas ou cole um link de localização primeiro.')
-            return
-        }
-
-        const extraido = extrairLatLngDeTexto(coordStr) || extrairLatLngDeTexto(linkStr)
-        if (!extraido) {
-            setAvisoFn(
-                'Link encurtado ou sem coordenadas explícitas na URL: o link ficou salvo e o botão de rota usará o link diretamente.'
-            )
-            return
-        }
-
-        const coordFormatada = `${extraido.lat}, ${extraido.lng}`
-        setDadosFn((prev) => ({
-            ...prev,
-            coordenadas: prev.coordenadas?.trim() ? prev.coordenadas : coordFormatada,
-            latitude: extraido.lat,
-            longitude: extraido.lng,
-        }))
-
-        setLoadingFn(true)
-        try {
-            const resp = await fetch(
-                `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${extraido.lat}&lon=${extraido.lng}&accept-language=pt-BR`,
-                { headers: { Accept: 'application/json' } }
-            )
-            if (!resp.ok) throw new Error('Falha na consulta')
-            const json = await resp.json()
-            const addr = json?.address || {}
-
-            const ufDetectada =
-                NOME_PARA_UF[normalizarSemAcento(addr.state)] ||
-                (addr['ISO3166-2-lvl4'] || '').split('-')[1]?.toUpperCase() ||
-                ''
-            const cidadeDetectada = (
-                addr.city ||
-                addr.town ||
-                addr.village ||
-                addr.municipality ||
-                ''
-            ).toUpperCase()
-            const viaDetectada = (addr.road || addr.pedestrian || addr.highway || '').toUpperCase()
-            const numeroDetectado = (addr.house_number || '').toUpperCase()
-            const bairroDetectado = (
-                addr.suburb ||
-                addr.neighbourhood ||
-                addr.quarter ||
-                addr.city_district ||
-                ''
-            ).toUpperCase()
-            const refDetectada = (
-                addr.amenity ||
-                addr.building ||
-                addr.shop ||
-                addr.hamlet ||
-                ''
-            ).toUpperCase()
-
-            const camposFaltantes = []
-
-            if (dadosAtuais.tipo_via === 'Rodovia/Rural') {
-                const matchRod = viaDetectada.match(
-                    /\b(BR|PR|SP|SC|RS|MS|MT|GO|MG|RJ|BA|PE|CE|PA)\s*-?\s*(\d{2,3})\b/
-                )
-                const jurisdicao = matchRod ? matchRod[1] : ''
-                const codigo = matchRod ? matchRod[2] : ''
-                if (!jurisdicao && !codigo) camposFaltantes.push('Prefixo/Código da Rodovia')
-                camposFaltantes.push('Marco KM')
-                if (!cidadeDetectada) camposFaltantes.push('Município')
-
-                setDadosFn((prev) => ({
-                    ...prev,
-                    coordenadas: coordFormatada,
-                    latitude: extraido.lat,
-                    longitude: extraido.lng,
-                    rodovia_jurisdicao: jurisdicao || prev.rodovia_jurisdicao,
-                    rodovia_codigo: codigo || prev.rodovia_codigo,
-                    rodovia_uf: ufDetectada || prev.rodovia_uf,
-                    rodovia_cidade: cidadeDetectada || prev.rodovia_cidade,
-                    ponto_referencia:
-                        prev.ponto_referencia ||
-                        refDetectada ||
-                        (!matchRod && viaDetectada ? viaDetectada : ''),
-                }))
-            } else {
-                if (!viaDetectada) camposFaltantes.push('Via 1')
-                if (!numeroDetectado) camposFaltantes.push('Número')
-                if (!bairroDetectado) camposFaltantes.push('Bairro')
-                if (!cidadeDetectada) camposFaltantes.push('Cidade')
-
-                setDadosFn((prev) => ({
-                    ...prev,
-                    coordenadas: coordFormatada,
-                    latitude: extraido.lat,
-                    longitude: extraido.lng,
-                    via1: viaDetectada || prev.via1,
-                    numero_end: numeroDetectado || prev.numero_end,
-                    bairro: bairroDetectado || prev.bairro,
-                    estado: ufDetectada || prev.estado,
-                    cidade_urb: cidadeDetectada || prev.cidade_urb,
-                    ponto_referencia: prev.ponto_referencia || refDetectada,
-                }))
-            }
-
-            if (camposFaltantes.length > 0) {
-                setAvisoFn(
-                    `Endereço aproximado preenchido (${coordFormatada}). Campos sem dado exato (${camposFaltantes.join(', ')}) usarão as coordenadas GPS diretamente na rota.`
-                )
-            } else {
-                setAvisoFn(`Endereço aproximado preenchido com sucesso a partir de ${coordFormatada}.`)
-            }
-        } catch {
-            setAvisoFn(
-                `Coordenadas (${coordFormatada}) salvas. Não foi possível consultar o endereço aproximado agora, mas o botão de rota já navega direto pelas coordenadas.`
-            )
-        } finally {
-            setLoadingFn(false)
-        }
-    }
-
-    function renderBlocoLocalizacaoRapida({
-        dados,
-        setDados,
-        buscando,
-        setBuscando,
-        aviso,
-        setAviso,
-        desabilitado = false,
-    }) {
-        const urlRotaPreview = construirUrlRota(dados)
-        const temEntradaGeo = Boolean(
-            (dados.coordenadas || '').trim() || (dados.link_localizacao || '').trim()
-        )
-
-        return (
-            <div className="bg-sky-950/30 border-2 border-dashed border-sky-500/60 rounded-xl p-3 space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[11px] font-extrabold text-sky-300 uppercase flex items-center gap-1.5">
-                        <Compass className="w-4 h-4 text-sky-400" />
-                        Localização Rápida (Coordenadas GPS / Link WhatsApp)
-                    </span>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                        {urlRotaPreview && (
-                            <a
-                                href={urlRotaPreview}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="bg-qth-blue hover:bg-blue-700 text-white font-bold px-2.5 py-1.5 rounded-lg text-[11px] flex items-center gap-1 transition-colors"
-                            >
-                                <Navigation className="w-3.5 h-3.5" />
-                                ABRIR ROTA / GPS
-                            </a>
-                        )}
-
-                        <button
-                            type="button"
-                            disabled={desabilitado || buscando || !temEntradaGeo}
-                            onClick={() =>
-                                executarPreenchimentoPorGeo(dados, setDados, setBuscando, setAviso)
-                            }
-                            className="bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-extrabold px-3 py-1.5 rounded-lg text-[11px] flex items-center gap-1.5 cursor-pointer transition-colors"
-                        >
-                            {buscando ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                                <MapPin className="w-3.5 h-3.5" />
-                            )}
-                            {buscando ? 'BUSCANDO ENDEREÇO...' : 'PREENCHER ENDEREÇO'}
-                        </button>
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                    <div>
-                        <label className="block text-[10px] font-bold text-sky-200 mb-1 uppercase">
-                            Coordenadas (Latitude, Longitude)
-                        </label>
-                        <input
-                            type="text"
-                            disabled={desabilitado}
-                            placeholder="EX: -23.766120, -53.325040"
-                            value={dados.coordenadas || ''}
-                            onChange={(e) => {
-                                const val = e.target.value
-                                const parsed = extrairLatLngDeTexto(val)
-                                setDados({
-                                    ...dados,
-                                    coordenadas: val,
-                                    latitude: parsed ? parsed.lat : null,
-                                    longitude: parsed ? parsed.lng : null,
-                                })
-                            }}
-                            className="w-full bg-slate-950/90 border border-sky-500/60 rounded-lg px-3 py-2 text-xs font-mono font-semibold text-sky-100 placeholder-sky-500/60 focus:outline-none focus:border-sky-300 disabled:opacity-60"
-                        />
-                    </div>
-
-                    <div>
-                        <label className="block text-[10px] font-bold text-sky-200 mb-1 uppercase">
-                            Link de Localização (Google Maps / Waze / WhatsApp)
-                        </label>
-                        <input
-                            type="text"
-                            disabled={desabilitado}
-                            placeholder="COLE AQUI O LINK ENVIADO PELO SOLICITANTE"
-                            value={dados.link_localizacao || ''}
-                            onChange={(e) => {
-                                const val = e.target.value
-                                const parsed = extrairLatLngDeTexto(val)
-                                setDados({
-                                    ...dados,
-                                    link_localizacao: val,
-                                    latitude: parsed ? parsed.lat : dados.latitude,
-                                    longitude: parsed ? parsed.lng : dados.longitude,
-                                })
-                            }}
-                            className="w-full bg-slate-950/90 border border-sky-500/60 rounded-lg px-3 py-2 text-xs font-semibold text-sky-100 placeholder-sky-500/60 focus:outline-none focus:border-sky-300 disabled:opacity-60"
-                        />
-                    </div>
-                </div>
-
-                {aviso && (
-                    <p className="text-[11px] text-sky-200 bg-sky-900/40 border border-sky-500/40 px-2.5 py-1.5 rounded-lg">
-                        {aviso}
-                    </p>
-                )}
-            </div>
-        )
-    }
 
     function calcularBalancoVitimas(oc, empenhosDaOc) {
         const totalEstimado = Math.max(1, parseInt(oc?.numero_vitimas, 10) || 1)
@@ -1303,7 +646,6 @@ export default function PainelCentral({ perfil }) {
 
     function descartarRascunhoNova() {
         setFormNova(criarFormInicialPerfil(perfil))
-        setAvisoGeoNova('')
         setErroNova('')
         setMostrarFormNova(false)
         try {
@@ -1394,7 +736,6 @@ export default function PainelCentral({ perfil }) {
                 valorNovo: `Nº ${numeroLimpo} • ${vitimasQtd} VÍTIMA(S) • ${payload.tipo_atendimento} • MOTIVO: ${payload.motivo}`,
             })
             setFormNova(criarFormInicialPerfil(perfil))
-            setAvisoGeoNova('')
             setMostrarFormNova(false)
             try {
                 localStorage.removeItem(chaveRascunhoNova)
@@ -1515,6 +856,7 @@ export default function PainelCentral({ perfil }) {
                     'link_localizacao',
                     'motivo',
                     'nome_paciente',
+                    'recursos_solicitados'
                 ],
             })
             setMensagemModal('Dados da aba TARM salvos com sucesso.')
@@ -1558,6 +900,7 @@ export default function PainelCentral({ perfil }) {
             recurso_indicado: (editRegulador.recurso_indicado || '').trim().toUpperCase(),
             conduta_regulacao: (editRegulador.conduta_regulacao || '').trim(),
             atualizado_em: new Date().toISOString(),
+            recursos_solicitados: normalizarRecursosSolicitados(editRegulador.recursos_solicitados),
         }
 
         const { error } = await supabase
@@ -1847,7 +1190,7 @@ export default function PainelCentral({ perfil }) {
         setSalvandoSecao(false)
     }
 
-    async function handleEmpenharViatura() {
+async function handleEmpenharViatura() {
         if (!podeEditarRadio || !ocorrenciaSelecionada || !viaturaParaEmpenhar) return
         const vtrObj = viaturas.find(
             (v) => v.prefixo.toUpperCase() === viaturaParaEmpenhar.toUpperCase()
@@ -1910,6 +1253,24 @@ export default function PainelCentral({ perfil }) {
                 campo: 'EMPENHO_VTR',
                 valorNovo: `VTR ${vtrObj.prefixo.toUpperCase()} empenhada na ocorrência ${ocorrenciaSelecionada.numero_ocorrencia}`,
             })
+
+            const reqsOc = normalizarRecursosSolicitados(ocorrenciaSelecionada.recursos_solicitados)
+            if (reqsOc.length > 0) {
+                const resumoReqs = reqsOc
+                    .map(
+                        (r) =>
+                            `${r.quantidade}x ${r.recurso}${r.paciente_nome ? ` [PAC: ${r.paciente_nome}]` : ''}${r.observacao ? ` (${r.observacao})` : ''}`
+                    )
+                    .join(' | ')
+                await registrarAuditoria({
+                    perfil,
+                    tabela: 'ocorrencia_viaturas',
+                    registroId: empCriado?.id || ocorrenciaSelecionada.id,
+                    acao: 'EDICAO',
+                    campo: `DIRECIONAMENTO_REGULADOR_${vtrObj.prefixo.toUpperCase()}`,
+                    valorNovo: resumoReqs,
+                })
+            }
 
             setViaturaParaEmpenhar('')
             setMensagemModal(`Viatura ${vtrObj.prefixo.toUpperCase()} empenhada.`)
@@ -2304,7 +1665,6 @@ export default function PainelCentral({ perfil }) {
                                 onClick={() => {
                                     setMostrarFormNova(!mostrarFormNova)
                                     setErroNova('')
-                                    setAvisoGeoNova('')
                                 }}
                                 className="bg-qth-green hover:bg-green-700 text-white font-bold px-3.5 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
                             >
@@ -2317,541 +1677,19 @@ export default function PainelCentral({ perfil }) {
 
                 {/* Formulário de Nova Ocorrência (TARM) */}
                 {mostrarFormNova && podeCriarOuEditarTarm && (
-                    <form
+                    <FormNovaOcorrencia
+                        formNova={formNova}
+                        setFormNova={setFormNova}
+                        criandoOcorrencia={criandoOcorrencia}
+                        erroNova={erroNova}
+                        listaEstados={listaEstados}
+                        cidadesNovaUrb={cidadesNovaUrb}
+                        cidadesNovaRod={cidadesNovaRod}
+                        cidadesNovaOrig={cidadesNovaOrig}
+                        cidadesNovaDest={cidadesNovaDest}
                         onSubmit={handleCriarOcorrencia}
-                        className="bg-qth-bg/80 border border-slate-700 rounded-xl p-4 space-y-4"
-                    >
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/70 pb-2.5">
-                            <span className="text-xs font-extrabold text-white uppercase flex items-center gap-1.5">
-                                <PhoneCall className="w-4 h-4 text-qth-orange" />
-                                Abertura de Ocorrência (TARM) • Rascunho Salvo Automaticamente
-                            </span>
-
-                            <div className="flex flex-wrap items-center gap-1.5">
-                                <span className="text-[11px] font-bold text-slate-300 uppercase mr-1">
-                                    Prioridade:
-                                </span>
-                                {PRIORIDADES.map((prio) => {
-                                    const selecionada = formNova.prioridade === prio.id
-                                    return (
-                                        <button
-                                            key={prio.id}
-                                            type="button"
-                                            onClick={() => setFormNova({ ...formNova, prioridade: prio.id })}
-                                            className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold uppercase border cursor-pointer transition-all ${selecionada
-                                                ? prio.btnAtivo
-                                                : 'bg-qth-card text-slate-300 border-slate-600 hover:border-slate-400'
-                                                }`}
-                                        >
-                                            {prio.label}
-                                        </button>
-                                    )
-                                })}
-                            </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                            <div>
-                                <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                    Nº Ocorrência <span className="text-qth-orange">*</span>
-                                </label>
-                                <input
-                                    type="text"
-                                    required
-                                    placeholder="EX: 202600145"
-                                    value={formNova.numero_ocorrencia}
-                                    onChange={(e) =>
-                                        setFormNova({
-                                            ...formNova,
-                                            numero_ocorrencia: e.target.value.toUpperCase(),
-                                        })
-                                    }
-                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-bold text-qth-orange uppercase focus:outline-none focus:border-qth-orange"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                    Nome do Solicitante
-                                </label>
-                                <input
-                                    type="text"
-                                    placeholder="EX: MARIA SOUZA"
-                                    value={formNova.solicitante_nome}
-                                    onChange={(e) =>
-                                        setFormNova({
-                                            ...formNova,
-                                            solicitante_nome: e.target.value.toUpperCase(),
-                                        })
-                                    }
-                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                    Telefone do Solicitante
-                                </label>
-                                <input
-                                    type="text"
-                                    placeholder="EX: (44) 99999-0000"
-                                    value={formNova.solicitante_telefone}
-                                    onChange={(e) =>
-                                        setFormNova({ ...formNova, solicitante_telefone: e.target.value })
-                                    }
-                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white focus:outline-none focus:border-qth-orange"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                    Nº Inicial de Vítimas
-                                </label>
-                                <input
-                                    type="number"
-                                    min={1}
-                                    value={formNova.numero_vitimas}
-                                    onChange={(e) =>
-                                        setFormNova({ ...formNova, numero_vitimas: e.target.value })
-                                    }
-                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white focus:outline-none focus:border-qth-orange"
-                                />
-                                {(parseInt(formNova.numero_vitimas, 10) || 1) >= 2 && (
-                                    <p className="text-[10px] font-extrabold text-qth-yellow mt-1 uppercase">
-                                        MÚLTIPLAS VÍTIMAS (2+) — REVISÃO DE IMV NA REGULAÇÃO
-                                    </p>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <div>
-                                <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                    Natureza da Ocorrência
-                                </label>
-                                <div className="grid grid-cols-2 gap-2">
-                                    {NATUREZAS_ATENDIMENTO.map((nat) => (
-                                        <button
-                                            key={nat}
-                                            type="button"
-                                            onClick={() => setFormNova({ ...formNova, tipo_atendimento: nat })}
-                                            className={`py-2 px-3 rounded-lg text-xs font-extrabold uppercase border cursor-pointer transition-colors ${formNova.tipo_atendimento === nat
-                                                ? 'bg-qth-orange text-white border-qth-orange'
-                                                : 'bg-qth-card text-slate-300 border-slate-600 hover:border-slate-500'
-                                                }`}
-                                        >
-                                            {nat}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-
-                            <div>
-                                <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                    Tipo de Local
-                                </label>
-                                <div className="grid grid-cols-3 gap-2">
-                                    {TIPOS_LOCAL.map((loc) => (
-                                        <button
-                                            key={loc}
-                                            type="button"
-                                            onClick={() => setFormNova({ ...formNova, tipo_local: loc })}
-                                            className={`py-2 px-2 rounded-lg text-[11px] font-bold uppercase border cursor-pointer transition-colors ${formNova.tipo_local === loc
-                                                ? 'bg-qth-blue text-white border-blue-400'
-                                                : 'bg-qth-card text-slate-300 border-slate-600 hover:border-slate-500'
-                                                }`}
-                                        >
-                                            {loc}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-
-                        {formNova.tipo_atendimento === 'PRIMÁRIO' ? (
-                            <div className="bg-qth-card/70 border border-slate-700/70 rounded-xl p-3 space-y-3">
-                                <div className="flex flex-wrap items-center gap-4">
-                                    <span className="text-[11px] font-bold text-qth-orange uppercase">
-                                        Endereço (Padrão QTH Logs):
-                                    </span>
-                                    {TIPOS_VIA.map((via) => (
-                                        <button
-                                            key={via}
-                                            type="button"
-                                            onClick={() => {
-                                                setFormNova({ ...formNova, tipo_via: via })
-                                                setAvisoGeoNova('')
-                                            }}
-                                            className={`px-2.5 py-1 rounded-lg text-xs font-bold cursor-pointer border ${formNova.tipo_via === via
-                                                ? 'bg-qth-orange/25 text-orange-200 border-qth-orange'
-                                                : 'bg-qth-bg text-slate-400 border-slate-700'
-                                                }`}
-                                        >
-                                            {via}
-                                        </button>
-                                    ))}
-                                </div>
-
-                                {renderBlocoLocalizacaoRapida({
-                                    dados: formNova,
-                                    setDados: setFormNova,
-                                    buscando: buscandoGeoNova,
-                                    setBuscando: setBuscandoGeoNova,
-                                    aviso: avisoGeoNova,
-                                    setAviso: setAvisoGeoNova,
-                                })}
-
-                                {formNova.tipo_via === 'Urbana' ? (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                        <div className="lg:col-span-2">
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Via 1 (Rua / Av / Hospital / UBS)
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.via1}
-                                                onChange={(e) =>
-                                                    setFormNova({ ...formNova, via1: e.target.value.toUpperCase() })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Via 2 / Cruzamento
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.via2}
-                                                onChange={(e) =>
-                                                    setFormNova({ ...formNova, via2: e.target.value.toUpperCase() })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Número
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.numero_end}
-                                                onChange={(e) =>
-                                                    setFormNova({ ...formNova, numero_end: e.target.value.toUpperCase() })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Bairro
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.bairro}
-                                                onChange={(e) =>
-                                                    setFormNova({ ...formNova, bairro: e.target.value.toUpperCase() })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Ponto de Referência
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.ponto_referencia}
-                                                onChange={(e) =>
-                                                    setFormNova({
-                                                        ...formNova,
-                                                        ponto_referencia: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <SelectPesquisavel
-                                            label="UF"
-                                            opcoes={listaEstados}
-                                            valor={formNova.estado}
-                                            onChange={(uf) => setFormNova({ ...formNova, estado: uf, cidade_urb: '' })}
-                                        />
-                                        <SelectPesquisavel
-                                            label="Cidade"
-                                            opcoes={cidadesNovaUrb}
-                                            valor={formNova.cidade_urb}
-                                            permiteTextoLivre={true}
-                                            onChange={(cid) => setFormNova({ ...formNova, cidade_urb: cid })}
-                                        />
-                                    </div>
-                                ) : (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Prefixo Rodovia (Ex: BR / PR)
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.rodovia_jurisdicao}
-                                                onChange={(e) =>
-                                                    setFormNova({
-                                                        ...formNova,
-                                                        rodovia_jurisdicao: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Código (Ex: 323 / 482)
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.rodovia_codigo}
-                                                onChange={(e) =>
-                                                    setFormNova({
-                                                        ...formNova,
-                                                        rodovia_codigo: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Marco KM
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.rodovia_km}
-                                                onChange={(e) =>
-                                                    setFormNova({ ...formNova, rodovia_km: e.target.value })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Ponto de Referência
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={formNova.ponto_referencia}
-                                                onChange={(e) =>
-                                                    setFormNova({
-                                                        ...formNova,
-                                                        ponto_referencia: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                                            />
-                                        </div>
-                                        <SelectPesquisavel
-                                            label="UF Rodovia"
-                                            opcoes={listaEstados}
-                                            valor={formNova.rodovia_uf}
-                                            onChange={(uf) =>
-                                                setFormNova({ ...formNova, rodovia_uf: uf, rodovia_cidade: '' })
-                                            }
-                                        />
-                                        <SelectPesquisavel
-                                            label="Município Rodovia"
-                                            opcoes={cidadesNovaRod}
-                                            valor={formNova.rodovia_cidade}
-                                            permiteTextoLivre={true}
-                                            onChange={(cid) => setFormNova({ ...formNova, rodovia_cidade: cid })}
-                                        />
-                                    </div>
-                                )}
-                            </div>
-                        ) : (
-                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                                <div className="bg-qth-card/70 border border-slate-700/70 rounded-xl p-3 space-y-2.5">
-                                    <p className="text-[11px] font-extrabold text-qth-orange uppercase">
-                                        Origem da Transferência
-                                    </p>
-                                    <input
-                                        type="text"
-                                        placeholder="INSTITUIÇÃO / LOCAL DE ORIGEM"
-                                        value={formNova.origem_instituicao}
-                                        onChange={(e) =>
-                                            setFormNova({
-                                                ...formNova,
-                                                origem_instituicao: e.target.value.toUpperCase(),
-                                            })
-                                        }
-                                        className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                    />
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                        <input
-                                            type="text"
-                                            placeholder="RUA / AVENIDA"
-                                            value={formNova.origem_rua}
-                                            onChange={(e) =>
-                                                setFormNova({ ...formNova, origem_rua: e.target.value.toUpperCase() })
-                                            }
-                                            className="sm:col-span-2 bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                        />
-                                        <input
-                                            type="text"
-                                            placeholder="Nº"
-                                            value={formNova.origem_numero}
-                                            onChange={(e) =>
-                                                setFormNova({
-                                                    ...formNova,
-                                                    origem_numero: e.target.value.toUpperCase(),
-                                                })
-                                            }
-                                            className="bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                        />
-                                    </div>
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                        <input
-                                            type="text"
-                                            placeholder="BAIRRO"
-                                            value={formNova.origem_bairro}
-                                            onChange={(e) =>
-                                                setFormNova({
-                                                    ...formNova,
-                                                    origem_bairro: e.target.value.toUpperCase(),
-                                                })
-                                            }
-                                            className="bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                        />
-                                        <SelectPesquisavel
-                                            label="UF"
-                                            opcoes={listaEstados}
-                                            valor={formNova.origem_uf}
-                                            onChange={(uf) =>
-                                                setFormNova({ ...formNova, origem_uf: uf, origem_cidade: '' })
-                                            }
-                                        />
-                                        <SelectPesquisavel
-                                            label="Cidade"
-                                            opcoes={cidadesNovaOrig}
-                                            valor={formNova.origem_cidade}
-                                            permiteTextoLivre={true}
-                                            onChange={(cid) => setFormNova({ ...formNova, origem_cidade: cid })}
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="bg-qth-card/70 border border-slate-700/70 rounded-xl p-3 space-y-2.5">
-                                    <p className="text-[11px] font-extrabold text-qth-orange uppercase">
-                                        Destino da Transferência
-                                    </p>
-                                    <input
-                                        type="text"
-                                        placeholder="INSTITUIÇÃO / LOCAL DE DESTINO"
-                                        value={formNova.destino_instituicao}
-                                        onChange={(e) =>
-                                            setFormNova({
-                                                ...formNova,
-                                                destino_instituicao: e.target.value.toUpperCase(),
-                                            })
-                                        }
-                                        className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                    />
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                        <input
-                                            type="text"
-                                            placeholder="RUA / AVENIDA"
-                                            value={formNova.destino_rua}
-                                            onChange={(e) =>
-                                                setFormNova({
-                                                    ...formNova,
-                                                    destino_rua: e.target.value.toUpperCase(),
-                                                })
-                                            }
-                                            className="sm:col-span-2 bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                        />
-                                        <input
-                                            type="text"
-                                            placeholder="Nº"
-                                            value={formNova.destino_numero}
-                                            onChange={(e) =>
-                                                setFormNova({
-                                                    ...formNova,
-                                                    destino_numero: e.target.value.toUpperCase(),
-                                                })
-                                            }
-                                            className="bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                        />
-                                    </div>
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                        <input
-                                            type="text"
-                                            placeholder="BAIRRO"
-                                            value={formNova.destino_bairro}
-                                            onChange={(e) =>
-                                                setFormNova({
-                                                    ...formNova,
-                                                    destino_bairro: e.target.value.toUpperCase(),
-                                                })
-                                            }
-                                            className="bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase"
-                                        />
-                                        <SelectPesquisavel
-                                            label="UF"
-                                            opcoes={listaEstados}
-                                            valor={formNova.destino_uf}
-                                            onChange={(uf) =>
-                                                setFormNova({ ...formNova, destino_uf: uf, destino_cidade: '' })
-                                            }
-                                        />
-                                        <SelectPesquisavel
-                                            label="Cidade"
-                                            opcoes={cidadesNovaDest}
-                                            valor={formNova.destino_cidade}
-                                            permiteTextoLivre={true}
-                                            onChange={(cid) => setFormNova({ ...formNova, destino_cidade: cid })}
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        <div>
-                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                Motivo da Ocorrência <span className="text-qth-orange">*</span>
-                            </label>
-                            <input
-                                type="text"
-                                required
-                                placeholder="EX: QUEDA DE ALTURA / DOR TORÁCICA / TRANSFERÊNCIA UTI..."
-                                value={formNova.motivo}
-                                onChange={(e) =>
-                                    setFormNova({ ...formNova, motivo: e.target.value.toUpperCase() })
-                                }
-                                className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
-                            />
-                        </div>
-
-                        {erroNova && (
-                            <p className="text-xs text-red-400 bg-qth-red/15 border border-qth-red/40 p-2 rounded-lg">
-                                {erroNova}
-                            </p>
-                        )}
-
-                        <div className="flex justify-end gap-2">
-                            <button
-                                type="button"
-                                onClick={descartarRascunhoNova}
-                                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-300 cursor-pointer"
-                            >
-                                DESCARTAR E FECHAR
-                            </button>
-                            <button
-                                type="submit"
-                                disabled={criandoOcorrencia}
-                                className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-lg text-xs cursor-pointer"
-                            >
-                                {criandoOcorrencia ? 'CRIANDO...' : 'CRIAR OCORRÊNCIA'}
-                            </button>
-                        </div>
-                    </form>
+                        onDescartar={descartarRascunhoNova}
+                    />
                 )}
 
                 {/* Sub-abas por Status + Resumo Geral */}
@@ -3538,7 +2376,6 @@ export default function PainelCentral({ perfil }) {
                                                         disabled={!podeCriarOuEditarTarm}
                                                         onClick={() => {
                                                             setEditTarm({ ...editTarm, tipo_via: v })
-                                                            setAvisoGeoEdit('')
                                                         }}
                                                         className={`px-2.5 py-1 rounded text-xs font-bold cursor-pointer disabled:opacity-60 ${editTarm.tipo_via === v
                                                             ? 'bg-qth-orange text-white'
@@ -3550,15 +2387,13 @@ export default function PainelCentral({ perfil }) {
                                                 ))}
                                             </div>
 
-                                            {renderBlocoLocalizacaoRapida({
-                                                dados: editTarm,
-                                                setDados: setEditTarm,
-                                                buscando: buscandoGeoEdit,
-                                                setBuscando: setBuscandoGeoEdit,
-                                                aviso: avisoGeoEdit,
-                                                setAviso: setAvisoGeoEdit,
-                                                desabilitado: !podeCriarOuEditarTarm,
-                                            })}
+
+                                            <BlocoLocalizacaoRapida
+                                                dados={editTarm}
+                                                setDados={setEditTarm}
+                                                desabilitado={!podeCriarOuEditarTarm}
+                                                resetKey={ocorrenciaSelecionada?.id || ''}
+                                            />
 
                                             {editTarm.tipo_via === 'Urbana' ? (
                                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -4415,6 +3250,18 @@ export default function PainelCentral({ perfil }) {
                                         )}
                                     </div>
 
+                                    <BlocoRecursosRegulador
+                                        recursosSolicitados={editRegulador.recursos_solicitados || []}
+                                        onChange={(novaLista) =>
+                                            setEditRegulador({
+                                                ...editRegulador,
+                                                recursos_solicitados: novaLista,
+                                            })
+                                        }
+                                        pacientesDisponiveis={pacientesDisponiveisRegulador}
+                                        disabled={!podeEditarRegulador}
+                                    />
+
                                     {/* Regulação Geral da Ocorrência */}
                                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                         <SelectPesquisavel
@@ -4578,6 +3425,78 @@ export default function PainelCentral({ perfil }) {
                                     {renderPainelBalancoVitimas(ocorrenciaSelecionada, empenhosDaOcorrencia, {
                                         permitirEditarVtr: podeEditarRadio,
                                     })}
+
+                                    {normalizarRecursosSolicitados(ocorrenciaSelecionada.recursos_solicitados)
+                                        .length > 0 && (
+                                            <div className="bg-qth-bg/75 border border-sky-500/40 rounded-xl p-3 space-y-2">
+                                                <p className="text-[11px] font-extrabold text-sky-300 uppercase">
+                                                    Solicitações da Regulação para Despacho
+                                                </p>
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                                    {normalizarRecursosSolicitados(
+                                                        ocorrenciaSelecionada.recursos_solicitados
+                                                    ).map((reqItem, idxReq) => (
+                                                        <div
+                                                            key={reqItem.id || idxReq}
+                                                            className="bg-qth-card border border-slate-700 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-2"
+                                                        >
+                                                            <div className="space-y-0.5">
+                                                                <p className="text-xs font-extrabold text-white uppercase">
+                                                                    {reqItem.quantidade}x {reqItem.recurso || 'RECURSO'}
+                                                                </p>
+                                                                {reqItem.paciente_nome && (
+                                                                    <p className="text-[10px] font-bold text-sky-300 uppercase">
+                                                                        PACIENTE: {reqItem.paciente_info || reqItem.paciente_nome}
+                                                                    </p>
+                                                                )}
+                                                                {reqItem.observacao && (
+                                                                    <p className="text-[10px] text-slate-300 uppercase">
+                                                                        IDENTIFICAÇÃO / OBS: {reqItem.observacao}
+                                                                    </p>
+                                                                )}
+                                                            </div>
+
+                                                            {podeEditarRadio && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setViaturaParaEmpenhar((reqItem.recurso || '').toUpperCase())
+                                                                        const infoDirecionamento = [
+                                                                            `RECURSO SOLICITADO: ${reqItem.quantidade}x ${reqItem.recurso || 'RECURSO'}`,
+                                                                            reqItem.paciente_nome
+                                                                                ? `PACIENTE: ${reqItem.paciente_info || reqItem.paciente_nome}`
+                                                                                : '',
+                                                                            reqItem.observacao
+                                                                                ? `OBS/IDENTIFICAÇÃO: ${reqItem.observacao}`
+                                                                                : '',
+                                                                        ]
+                                                                            .filter(Boolean)
+                                                                            .join(' • ')
+
+                                                                        setEditRadio((prev) =>
+                                                                            prev
+                                                                                ? {
+                                                                                      ...prev,
+                                                                                      observacao_radio: prev.observacao_radio
+                                                                                          ? `${prev.observacao_radio}\n${infoDirecionamento}`
+                                                                                          : infoDirecionamento,
+                                                                                  }
+                                                                                : prev
+                                                                        )
+                                                                        setMensagemModal(
+                                                                            `Direcionamento (${reqItem.quantidade}x ${reqItem.recurso}) preparado para empenho.`
+                                                                        )
+                                                                    }}
+                                                                    className="bg-qth-orange hover:bg-orange-600 text-white font-bold px-2.5 py-1.5 rounded-lg text-[10px] uppercase cursor-pointer"
+                                                                >
+                                                                    PREPARAR EMPENHO
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
 
                                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
                                         {/* Coluna Esquerda: Empenho Multi-VTR, Horários Individuais, J, QTA */}
