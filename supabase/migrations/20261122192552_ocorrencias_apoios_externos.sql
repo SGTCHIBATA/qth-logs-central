@@ -1,0 +1,5 @@
+ALTER TABLE public.ocorrencias
+  ADD COLUMN IF NOT EXISTS apoio_policia BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS apoio_cobom_resgate BOOLEAN NOT NULL DEFAULT FALSE;
+
+NOTIFY pgrst, 'reload schema';

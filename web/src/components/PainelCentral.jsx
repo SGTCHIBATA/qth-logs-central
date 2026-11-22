@@ -2,31 +2,15 @@ import { useEffect, useState, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { registrarAuditoria, registrarAlteracoesEmLote } from '../lib/auditoria'
 import SelectPesquisavel from './SelectPesquisavel'
-import BlocoLocalizacaoRapida from './BlocoLocalizacaoRapida'
 import FormNovaOcorrencia from './FormNovaOcorrencia'
-import BlocoRecursosRegulador from './BlocoRecursosRegulador'
+import ModalOcorrencia from './ModalOcorrencia'
 import cidadesData from '../data/cidades.json'
 import {
     PRIORIDADES,
-    CORES_START,
-    CORES_VAZIAS,
     SUB_ABAS_STATUS,
-    STATUS_OCORRENCIA_OPCOES,
     NATUREZAS_ATENDIMENTO,
-    TIPOS_LOCAL,
-    TIPOS_VIA,
-    TIPOS_IDADE,
-    SEXOS_PACIENTE,
-    CLASSIFICACOES_RISCO,
-    RECURSOS_INDICADOS,
-    CODIGOS_J,
-    CODIGOS_QTA,
-    STATUS_EMPENHO_VTR,
-    FORM_NOVA_OCORRENCIA,
-    normalizarCoresVtr,
     somarCoresVtr,
     normalizarPacientesVtr,
-    inferirStatusPorHorario,
     obterGrupoDisponibilidadeVtr,
     obterEstiloRecursoMiniPainel,
     criarFormInicialPerfil,
@@ -38,29 +22,25 @@ import {
     calcularBalancoVitimas,
 } from '../utils/painelCentralHelpers'
 import {
+    executarEmpenharViatura,
+    executarAtualizarStatusEmpenho,
+    executarAlterarHorarioEStatusVtr,
+    executarSalvarHorariosVtr,
+    executarDesvincularEmpenho,
+    executarSalvarRadio,
+    executarAlterarCorVtr,
+    renderizarPainelBalancoVitimas,
+} from '../utils/despachoRadioHandlers.jsx'
+import {
     Radio,
     Plus,
     Search,
     RotateCcw,
     X,
-    AlertTriangle,
-    Truck,
-    Stethoscope,
-    PhoneCall,
-    ClipboardList,
-    CheckCircle2,
-    Lock,
-    Clock,
     MapPin,
     Users,
-    Save,
-    Send,
     Trash2,
     Navigation,
-    ShieldAlert,
-    UserPlus,
-    FileText,
-    Layers,
 } from 'lucide-react'
 
 
@@ -109,6 +89,19 @@ export default function PainelCentral({ perfil }) {
     const [rascunhosVtr, setRascunhosVtr] = useState({})
     const [novoPacientePorVtr, setNovoPacientePorVtr] = useState({})
     const [novaEvolucaoPorPaciente, setNovaEvolucaoPorPaciente] = useState({})
+
+    const [novoPacienteCena, setNovoPacienteCena] = useState({
+        nome: '',
+        idade: '',
+        tipo_idade: '',
+        sexo: '',
+        cor_start: '',
+        destino: '',
+        hipotese_diagnostica: '',
+        detalhamento: '',
+        recurso_indicado: '',
+        quadro_clinico: '',
+    })
 
     const [subAbaStatus, setSubAbaStatus] = useState('RESUMO_GERAL')
 
@@ -302,6 +295,49 @@ export default function PainelCentral({ perfil }) {
         setCarregando(false)
     }
 
+    async function handleAlterarPrioridadeImediata(novaPrioridade) {
+        if (!ocorrenciaSelecionada) return
+        const podeAlterar = podeCriarOuEditarTarm || podeEditarRegulador
+        if (!podeAlterar) return
+
+        const prioLimpa = (novaPrioridade || 'MEDIA').toUpperCase()
+        setSalvandoSecao(true)
+        setMensagemModal('')
+
+        const { error } = await supabase
+            .from('ocorrencias')
+            .update({
+                prioridade: prioLimpa,
+                atualizado_em: new Date().toISOString(),
+            })
+            .eq('id', ocorrenciaSelecionada.id)
+
+        if (error) {
+            setMensagemModal(`Erro ao atualizar prioridade: ${error.message}`)
+        } else {
+            await registrarAlteracoesEmLote({
+                perfil,
+                tabela: 'ocorrencias',
+                registroId: ocorrenciaSelecionada.id,
+                anterior: ocorrenciaSelecionada,
+                novo: { prioridade: prioLimpa },
+                campos: ['prioridade'],
+            })
+
+            setEditTarm((prev) => (prev ? { ...prev, prioridade: prioLimpa } : prev))
+            setEditRegulador((prev) => (prev ? { ...prev, prioridade: prioLimpa } : prev))
+            setOcorrencias((prev) =>
+                prev.map((o) =>
+                    o.id === ocorrenciaSelecionada.id ? { ...o, prioridade: prioLimpa } : o
+                )
+            )
+            setMensagemModal(`Prioridade da ocorrência alterada para ${prioLimpa}.`)
+            await carregarTudo({ silencioso: true })
+        }
+
+        setSalvandoSecao(false)
+    }
+
     function obterDraftVtr(emp) {
         const draft = rascunhosVtr[emp.id]
         if (draft) return draft
@@ -328,65 +364,78 @@ export default function PainelCentral({ perfil }) {
             quantidade: Math.max(1, parseInt(item?.quantidade, 10) || 1),
             paciente_id: item?.paciente_id || '',
             paciente_nome: (item?.paciente_nome || '').toUpperCase(),
-            paciente_info: (item?.paciente_info || '').toUpperCase(),
+            paciente_info: item?.paciente_info || null,
             observacao: (item?.observacao || '').toUpperCase(),
+            atendido: Boolean(item?.atendido),
+            viaturas_vinculadas: Array.isArray(item?.viaturas_vinculadas) ? item.viaturas_vinculadas : [],
+            recursos_empenhados_vinculados: Array.isArray(item?.recursos_empenhados_vinculados)
+                ? item.recursos_empenhados_vinculados
+                : [],
         }))
     }
 
-    const pacientesDisponiveisRegulador = useMemo(() => {
-        const lista = []
-        const vistos = new Set()
+    function anexarOuConsolidarRecursoParaPaciente(listaRecursosAtual, pacObj, recursoUpper) {
+        const recursoLimpo = (recursoUpper || '').trim().toUpperCase()
+        const baseLista = normalizarRecursosSolicitados(listaRecursosAtual)
+        if (!pacObj) return baseLista
 
-        if (ocorrenciaSelecionada?.nome_paciente) {
-            const nomeBase = ocorrenciaSelecionada.nome_paciente.trim().toUpperCase()
-            const detalheBase = [
-                nomeBase,
-                ocorrenciaSelecionada.idade_paciente
-                    ? `${ocorrenciaSelecionada.idade_paciente}${ocorrenciaSelecionada.tipo_idade_paciente ? ` ${ocorrenciaSelecionada.tipo_idade_paciente}` : ''}`
-                    : '',
-                ocorrenciaSelecionada.sexo_paciente || '',
-            ]
-                .filter(Boolean)
-                .join(' • ')
+        const pacIdLimpo = pacObj.id || ''
+        const semSolicitacaoAnteriorDoPaciente = baseLista.filter(
+            (r) => !(!r.atendido && pacIdLimpo && (r.paciente_id || '') === pacIdLimpo)
+        )
 
-            if (!vistos.has(detalheBase)) {
-                vistos.add(detalheBase)
-                lista.push({
-                    id: 'oc-paciente-principal',
-                    nome: nomeBase,
-                    resumo: detalheBase,
-                    valor: detalheBase,
-                })
+        if (!recursoLimpo) {
+            return semSolicitacaoAnteriorDoPaciente
+        }
+
+        const pacInfo = {
+            nome: pacObj.nome || '',
+            idade: pacObj.idade || '',
+            tipo_idade: pacObj.tipo_idade || '',
+            sexo: pacObj.sexo || '',
+            cor_start: pacObj.cor_start || '',
+            destino: pacObj.destino || '',
+            hipotese_diagnostica: pacObj.hipotese_diagnostica || '',
+            quadro_clinico: pacObj.detalhamento || pacObj.quadro_clinico || '',
+            vtr_origem: 'CENA / PRÉ-DESPACHO',
+        }
+
+        return [
+            ...semSolicitacaoAnteriorDoPaciente,
+            {
+                id: `req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                recurso: recursoLimpo,
+                quantidade: 1,
+                paciente_id: pacIdLimpo,
+                paciente_nome: pacObj.nome || '',
+                paciente_info: pacInfo,
+                observacao: (pacObj.detalhamento || pacObj.hipotese_diagnostica || '').trim().toUpperCase(),
+                atendido: false,
+                viaturas_vinculadas: [],
+            },
+        ]
+    }
+
+    function consolidarRecursosPendentesDaCena(listaRecursosAtual, listaPacientesCena) {
+        let atual = normalizarRecursosSolicitados(listaRecursosAtual)
+        const pacs = normalizarPacientesVtr(listaPacientesCena)
+
+        for (const pac of pacs) {
+            const recLimpo = (pac.recurso_indicado || '').trim().toUpperCase()
+            if (!recLimpo) continue
+            const jaTemSolicitacaoDoPaciente = atual.some(
+                (r) =>
+                    !r.atendido &&
+                    (r.paciente_id || '') === (pac.id || '') &&
+                    (r.recurso || '').toUpperCase() === recLimpo
+            )
+            if (!jaTemSolicitacaoDoPaciente) {
+                atual = anexarOuConsolidarRecursoParaPaciente(atual, pac, recLimpo)
             }
         }
 
-        for (const emp of empenhosDaOcorrencia || []) {
-            const pacs = normalizarPacientesVtr(emp.pacientes_detalhes)
-            pacs.forEach((pac, i) => {
-                const nomePac = (pac.nome || `PACIENTE #${i + 1}`).toUpperCase()
-                const resumoPac = [
-                    `${emp.prefixo}: ${nomePac}`,
-                    pac.idade ? `${pac.idade}${pac.tipo_idade ? ` ${pac.tipo_idade}` : ''}` : '',
-                    pac.cor_start ? `START ${pac.cor_start}` : '',
-                    pac.destino ? `DEST: ${pac.destino}` : '',
-                ]
-                    .filter(Boolean)
-                    .join(' • ')
-
-                if (!vistos.has(resumoPac)) {
-                    vistos.add(resumoPac)
-                    lista.push({
-                        id: pac.id,
-                        nome: nomePac,
-                        resumo: resumoPac,
-                        valor: resumoPac,
-                    })
-                }
-            })
-        }
-
-        return lista
-    }, [ocorrenciaSelecionada, empenhosDaOcorrencia])
+        return atual
+    }
 
     function atualizarDraftVtr(empId, empBase, patch) {
         setRascunhosVtr((prev) => {
@@ -418,12 +467,25 @@ export default function PainelCentral({ perfil }) {
         [ocorrencias, ocorrenciaSelecionadaId]
     )
 
+    const pacientesCenaOcorrencia = useMemo(() => {
+        if (!ocorrenciaSelecionadaId) return []
+        if (Array.isArray(ocorrenciaSelecionada?.pacientes_cena)) {
+            return normalizarPacientesVtr(ocorrenciaSelecionada.pacientes_cena)
+        }
+        return []
+    }, [ocorrenciaSelecionadaId, ocorrenciaSelecionada])
+
     function popularFormulariosModal(oc) {
         setEditTarm({ ...oc })
+        const pacsCenaSalvos = Array.isArray(oc.pacientes_cena) ? oc.pacientes_cena : []
+
         setEditRegulador({
             prioridade: oc.prioridade || 'MEDIA',
             protocolo_imv: Boolean(oc.protocolo_imv),
+            apoio_policia: Boolean(oc.apoio_policia),
+            apoio_cobom_resgate: Boolean(oc.apoio_cobom_resgate),
             recursos_solicitados: normalizarRecursosSolicitados(oc.recursos_solicitados),
+            pacientes_cena: normalizarPacientesVtr(pacsCenaSalvos),
             numero_vitimas: Math.max(1, parseInt(oc.numero_vitimas, 10) || 1),
             vitimas_meios_proprios: Math.max(0, parseInt(oc.vitimas_meios_proprios, 10) || 0),
             vitimas_terceiros: Math.max(0, parseInt(oc.vitimas_terceiros, 10) || 0),
@@ -433,6 +495,9 @@ export default function PainelCentral({ perfil }) {
             quadro_clinico: oc.quadro_clinico || '',
             recurso_indicado: oc.recurso_indicado || '',
             conduta_regulacao: oc.conduta_regulacao || '',
+            destino_instituicao: oc.destino_instituicao || '',
+            destino_uf: oc.destino_uf || '',
+            destino_cidade: oc.destino_cidade || '',
         })
         setEditRadio({
             status_ocorrencia: oc.status_ocorrencia || 'PENDENTE',
@@ -451,41 +516,20 @@ export default function PainelCentral({ perfil }) {
         if (ocorrenciaSelecionada && idInicializadoRef.current !== ocorrenciaSelecionada.id) {
             idInicializadoRef.current = ocorrenciaSelecionada.id
             popularFormulariosModal(ocorrenciaSelecionada)
+        } else if (ocorrenciaSelecionada && idInicializadoRef.current === ocorrenciaSelecionada.id) {
+            setEditRegulador((prev) =>
+                prev
+                    ? {
+                        ...prev,
+                        pacientes_cena: normalizarPacientesVtr(ocorrenciaSelecionada.pacientes_cena),
+                        recursos_solicitados: normalizarRecursosSolicitados(
+                            ocorrenciaSelecionada.recursos_solicitados
+                        ),
+                    }
+                    : prev
+            )
         }
     }, [ocorrenciaSelecionadaId, ocorrenciaSelecionada])
-
-
-    function calcularBalancoVitimas(oc, empenhosDaOc) {
-        const totalEstimado = Math.max(1, parseInt(oc?.numero_vitimas, 10) || 1)
-        const totaisCor = { ...CORES_VAZIAS }
-        let embarcadasVtr = 0
-
-        for (const emp of empenhosDaOc || []) {
-            const c = normalizarCoresVtr(emp.vitimas_cores)
-            totaisCor.VERMELHO += c.VERMELHO
-            totaisCor.AMARELO += c.AMARELO
-            totaisCor.VERDE += c.VERDE
-            totaisCor.PRETO += c.PRETO
-            embarcadasVtr += somarCoresVtr(c)
-        }
-
-        const meiosProprios = Math.max(0, parseInt(oc?.vitimas_meios_proprios, 10) || 0)
-        const terceiros = Math.max(0, parseInt(oc?.vitimas_terceiros, 10) || 0)
-        const obitoLocal = Math.max(0, parseInt(oc?.vitimas_obito_local, 10) || 0)
-        const atendidasOuSaidas = embarcadasVtr + meiosProprios + terceiros + obitoLocal
-        const saldoPendente = Math.max(0, totalEstimado - atendidasOuSaidas)
-
-        return {
-            totalEstimado,
-            totaisCor,
-            embarcadasVtr,
-            meiosProprios,
-            terceiros,
-            obitoLocal,
-            atendidasOuSaidas,
-            saldoPendente,
-        }
-    }
 
     const empenhosPorOcorrencia = useMemo(() => {
         const mapa = new Map()
@@ -506,6 +550,77 @@ export default function PainelCentral({ perfil }) {
         if (!ocorrenciaSelecionadaId) return []
         return empenhos.filter((e) => e.ocorrencia_id === ocorrenciaSelecionadaId)
     }, [empenhos, ocorrenciaSelecionadaId])
+
+    const pacientesDisponiveisRegulador = useMemo(() => {
+        const lista = []
+        const vistos = new Set()
+
+        const listaCenaAtiva = Array.isArray(editRegulador?.pacientes_cena)
+            ? normalizarPacientesVtr(editRegulador.pacientes_cena)
+            : pacientesCenaOcorrencia
+
+        for (const pac of listaCenaAtiva) {
+            const nomePac = (pac.nome || 'PACIENTE').trim().toUpperCase()
+            if (!vistos.has(pac.id)) {
+                vistos.add(pac.id)
+                lista.push({
+                    id: pac.id,
+                    nome: nomePac,
+                    idade: pac.idade || '',
+                    tipo_idade: pac.tipo_idade || '',
+                    sexo: pac.sexo || '',
+                    cor_start: pac.cor_start || '',
+                    destino: pac.destino || '',
+                    hipotese_diagnostica: pac.hipotese_diagnostica || '',
+                    quadro_clinico: pac.detalhamento || pac.quadro_clinico || '',
+                    vtrPrefixo: 'CENA / PRÉ-DESPACHO',
+                })
+            }
+        }
+
+        if (ocorrenciaSelecionada?.nome_paciente) {
+            const nomeBase = ocorrenciaSelecionada.nome_paciente.trim().toUpperCase()
+            if (!vistos.has('oc-paciente-principal')) {
+                vistos.add('oc-paciente-principal')
+                lista.push({
+                    id: 'oc-paciente-principal',
+                    nome: nomeBase,
+                    idade: ocorrenciaSelecionada.idade_paciente || '',
+                    tipo_idade: ocorrenciaSelecionada.tipo_idade_paciente || '',
+                    sexo: ocorrenciaSelecionada.sexo_paciente || '',
+                    cor_start: '',
+                    destino: '',
+                    hipotese_diagnostica: ocorrenciaSelecionada.hipotese_diagnostica || '',
+                    quadro_clinico: ocorrenciaSelecionada.quadro_clinico || '',
+                    vtrPrefixo: 'TARM',
+                })
+            }
+        }
+
+        for (const emp of empenhosDaOcorrencia || []) {
+            const pacs = normalizarPacientesVtr(emp.pacientes_detalhes)
+            pacs.forEach((pac, i) => {
+                const nomePac = (pac.nome || `PACIENTE #${i + 1}`).toUpperCase()
+                if (!vistos.has(pac.id)) {
+                    vistos.add(pac.id)
+                    lista.push({
+                        id: pac.id,
+                        nome: nomePac,
+                        idade: pac.idade || '',
+                        tipo_idade: pac.tipo_idade || '',
+                        sexo: pac.sexo || '',
+                        cor_start: pac.cor_start || '',
+                        destino: pac.destino || '',
+                        hipotese_diagnostica: pac.hipotese_diagnostica || '',
+                        quadro_clinico: pac.quadro_clinico || '',
+                        vtrPrefixo: emp.prefixo || '',
+                    })
+                }
+            })
+        }
+
+        return lista
+    }, [ocorrenciaSelecionada, empenhosDaOcorrencia, editRegulador?.pacientes_cena, pacientesCenaOcorrencia])
 
     const contadoresSubAbas = useMemo(() => {
         const counts = {
@@ -866,6 +981,70 @@ export default function PainelCentral({ perfil }) {
         setSalvandoSecao(false)
     }
 
+    async function persistirPacientesCenaNoBanco(novaListaPacientes, novaListaRecursos = null, msgSucesso = '') {
+        if (!ocorrenciaSelecionada) return
+        setSalvandoSecao(true)
+        setMensagemModal('')
+
+        const pacientesPreservados = normalizarPacientesVtr(novaListaPacientes)
+        const recursosParaSalvar =
+            novaListaRecursos !== null
+                ? normalizarRecursosSolicitados(novaListaRecursos)
+                : normalizarRecursosSolicitados(
+                    editRegulador?.recursos_solicitados ?? ocorrenciaSelecionada.recursos_solicitados
+                )
+
+        try {
+            const { error } = await supabase
+                .from('ocorrencias')
+                .update({
+                    pacientes_cena: pacientesPreservados,
+                    recursos_solicitados: recursosParaSalvar,
+                    atualizado_em: new Date().toISOString(),
+                })
+                .eq('id', ocorrenciaSelecionada.id)
+
+            if (error) {
+                setMensagemModal(`Erro ao sincronizar em tempo real: ${error.message}`)
+            } else {
+                setEditRegulador((prev) =>
+                    prev
+                        ? {
+                            ...prev,
+                            pacientes_cena: pacientesPreservados,
+                            recursos_solicitados: recursosParaSalvar,
+                        }
+                        : prev
+                )
+                setOcorrencias((prev) =>
+                    prev.map((o) =>
+                        o.id === ocorrenciaSelecionada.id
+                            ? {
+                                ...o,
+                                pacientes_cena: pacientesPreservados,
+                                recursos_solicitados: recursosParaSalvar,
+                            }
+                            : o
+                    )
+                )
+                if (msgSucesso) setMensagemModal(msgSucesso)
+                await carregarTudo({ silencioso: true })
+            }
+        } catch (err) {
+            setMensagemModal(`Erro inesperado ao salvar paciente da cena: ${err?.message || 'Falha de rede.'}`)
+        } finally {
+            setSalvandoSecao(false)
+        }
+    }
+
+    async function handleEnviarRecursosImediato(novaListaRecursos, msgSucesso = '') {
+        if (!ocorrenciaSelecionada) return
+        const pacsAtuais = normalizarPacientesVtr(
+            editRegulador?.pacientes_cena ?? ocorrenciaSelecionada.pacientes_cena
+        )
+        await persistirPacientesCenaNoBanco(pacsAtuais, novaListaRecursos, msgSucesso)
+    }
+
     async function handleSalvarRegulador() {
         if (!podeEditarRegulador || !ocorrenciaSelecionada || !editRegulador) return
         setSalvandoSecao(true)
@@ -874,7 +1053,13 @@ export default function PainelCentral({ perfil }) {
         const ativandoAgora =
             Boolean(editRegulador.protocolo_imv) && !Boolean(ocorrenciaSelecionada.protocolo_imv)
 
-        const payload = {
+        const pacsCenaAtual = normalizarPacientesVtr(editRegulador.pacientes_cena)
+        const recursosConsolidados = consolidarRecursosPendentesDaCena(
+            editRegulador.recursos_solicitados,
+            pacsCenaAtual
+        )
+
+        const payloadBase = {
             prioridade: editRegulador.prioridade || 'MEDIA',
             protocolo_imv: Boolean(editRegulador.protocolo_imv),
             imv_ativado_por: editRegulador.protocolo_imv
@@ -899,13 +1084,26 @@ export default function PainelCentral({ perfil }) {
             quadro_clinico: (editRegulador.quadro_clinico || '').trim(),
             recurso_indicado: (editRegulador.recurso_indicado || '').trim().toUpperCase(),
             conduta_regulacao: (editRegulador.conduta_regulacao || '').trim(),
+            destino_instituicao:
+                editRegulador.destino_instituicao !== undefined
+                    ? (editRegulador.destino_instituicao || '').trim().toUpperCase()
+                    : ocorrenciaSelecionada.destino_instituicao || '',
+            destino_uf:
+                editRegulador.destino_uf !== undefined
+                    ? (editRegulador.destino_uf || '').trim().toUpperCase()
+                    : ocorrenciaSelecionada.destino_uf || '',
+            destino_cidade:
+                editRegulador.destino_cidade !== undefined
+                    ? (editRegulador.destino_cidade || '').trim().toUpperCase()
+                    : ocorrenciaSelecionada.destino_cidade || '',
             atualizado_em: new Date().toISOString(),
-            recursos_solicitados: normalizarRecursosSolicitados(editRegulador.recursos_solicitados),
+            recursos_solicitados: recursosConsolidados,
+            pacientes_cena: pacsCenaAtual,
         }
 
         const { error } = await supabase
             .from('ocorrencias')
-            .update(payload)
+            .update(payloadBase)
             .eq('id', ocorrenciaSelecionada.id)
 
         if (error) {
@@ -916,7 +1114,7 @@ export default function PainelCentral({ perfil }) {
                 tabela: 'ocorrencias',
                 registroId: ocorrenciaSelecionada.id,
                 anterior: ocorrenciaSelecionada,
-                novo: payload,
+                novo: payloadBase,
                 campos: [
                     'prioridade',
                     'protocolo_imv',
@@ -931,15 +1129,168 @@ export default function PainelCentral({ perfil }) {
                     'conduta_regulacao',
                 ],
             })
+            setEditRegulador((prev) =>
+                prev
+                    ? {
+                        ...prev,
+                        pacientes_cena: pacsCenaAtual,
+                        recursos_solicitados: recursosConsolidados,
+                    }
+                    : prev
+            )
             setMensagemModal(
                 ativandoAgora
-                    ? 'PROTOCOLO IMV ATIVADO pelo Médico Regulador e dados salvos.'
-                    : 'Registro médico e prioridade da aba REGULADOR salvos.'
+                    ? 'PROTOCOLO IMV ATIVADO pelo Médico Regulador, pendências consolidadas e dados salvos.'
+                    : 'Registro médico salvo e pendências de recursos verificadas/enviadas.'
             )
             await carregarTudo({ silencioso: true })
         }
 
         setSalvandoSecao(false)
+    }
+
+    async function handleAdicionarPacienteCena() {
+        if (!podeEditarClinicaPaciente || !ocorrenciaSelecionada || !editRegulador) return
+        const listaAtual = normalizarPacientesVtr(editRegulador.pacientes_cena)
+        const recursoIndicado = (novoPacienteCena.recurso_indicado || '').trim().toUpperCase()
+        const hipoteseDiagnostica = (novoPacienteCena.hipotese_diagnostica || '').trim().toUpperCase()
+        const destinoTexto = (novoPacienteCena.destino || '').trim().toUpperCase()
+        const detalhamentoTexto = (novoPacienteCena.detalhamento || novoPacienteCena.quadro_clinico || '').trim()
+
+        const novoPac = {
+            id: `pac-cena-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            nome: (novoPacienteCena.nome || `PACIENTE ${listaAtual.length + 1}`).trim().toUpperCase(),
+            idade: (novoPacienteCena.idade || '').trim(),
+            tipo_idade: novoPacienteCena.tipo_idade || '',
+            sexo: novoPacienteCena.sexo || '',
+            cor_start: novoPacienteCena.cor_start || '',
+            destino: destinoTexto,
+            hipotese_diagnostica: hipoteseDiagnostica,
+            recurso_indicado: recursoIndicado,
+            detalhamento: detalhamentoTexto,
+            quadro_clinico: detalhamentoTexto,
+            evolucoes: [],
+        }
+
+        const novaLista = [...listaAtual, novoPac]
+        const novaListaRecursos = recursoIndicado
+            ? anexarOuConsolidarRecursoParaPaciente(
+                editRegulador.recursos_solicitados,
+                novoPac,
+                recursoIndicado
+            )
+            : editRegulador.recursos_solicitados
+
+        setNovoPacienteCena({
+            nome: '',
+            idade: '',
+            tipo_idade: '',
+            sexo: '',
+            cor_start: '',
+            destino: '',
+            hipotese_diagnostica: '',
+            detalhamento: '',
+            recurso_indicado: '',
+            quadro_clinico: '',
+        })
+
+        await persistirPacientesCenaNoBanco(
+            novaLista,
+            novaListaRecursos,
+            recursoIndicado
+                ? `Paciente ${novoPac.nome} registrado e recurso (${recursoIndicado}) enviado imediatamente ao Rádio Operador.`
+                : `Paciente ${novoPac.nome} registrado na cena e sincronizado em tempo real.`
+        )
+    }
+
+    async function handleAtualizarPacienteCenaLocal(pacienteId, patch) {
+        if (!podeEditarClinicaPaciente || !ocorrenciaSelecionada || !editRegulador) return
+        const listaAtual = normalizarPacientesVtr(editRegulador.pacientes_cena)
+        let pacAtualizado = null
+        const dadosPatchBase = typeof patch === 'function' ? null : patch
+
+        const novaLista = listaAtual.map((p) => {
+            if (p.id !== pacienteId) return p
+            const dadosPatch = typeof patch === 'function' ? patch(p) : patch
+            const proximo = normalizarPacientesVtr([{ ...p, ...dadosPatch }])[0]
+            pacAtualizado = proximo
+            return proximo
+        })
+
+        let novaListaRecursos = editRegulador.recursos_solicitados
+        const mudouRecurso =
+            pacAtualizado &&
+            (dadosPatchBase
+                ? 'recurso_indicado' in dadosPatchBase
+                : true)
+
+        if (mudouRecurso && pacAtualizado) {
+            novaListaRecursos = anexarOuConsolidarRecursoParaPaciente(
+                editRegulador.recursos_solicitados,
+                pacAtualizado,
+                pacAtualizado.recurso_indicado
+            )
+        }
+
+        await persistirPacientesCenaNoBanco(novaLista, novaListaRecursos)
+    }
+
+    async function handleRemoverSolicitacaoDespacho(reqItem) {
+        if (!podeEditarRadio || !ocorrenciaSelecionada || !reqItem) return
+        const listaAtual = normalizarRecursosSolicitados(ocorrenciaSelecionada.recursos_solicitados)
+        const alvo = listaAtual.find((r) => r.id === reqItem.id) || reqItem
+        const vinculosProprios = Array.isArray(alvo.recursos_empenhados_vinculados)
+            ? alvo.recursos_empenhados_vinculados
+            : []
+        if (vinculosProprios.length === 0) return
+
+        const novaLista = listaAtual.filter((r) => r.id !== alvo.id)
+        setSalvandoSecao(true)
+        setMensagemModal('')
+
+        try {
+            const { error } = await supabase
+                .from('ocorrencias')
+                .update({
+                    recursos_solicitados: novaLista,
+                    atualizado_em: new Date().toISOString(),
+                })
+                .eq('id', ocorrenciaSelecionada.id)
+
+            if (error) {
+                setMensagemModal(`Erro ao remover solicitação: ${error.message}`)
+            } else {
+                setEditRegulador((prev) =>
+                    prev ? { ...prev, recursos_solicitados: novaLista } : prev
+                )
+                setOcorrencias((prev) =>
+                    prev.map((o) =>
+                        o.id === ocorrenciaSelecionada.id
+                            ? { ...o, recursos_solicitados: novaLista }
+                            : o
+                    )
+                )
+                setMensagemModal(`Solicitação (${alvo.quantidade}x ${alvo.recurso}) removida.`)
+                await carregarTudo({ silencioso: true })
+            }
+        } finally {
+            setSalvandoSecao(false)
+        }
+    }
+
+    async function handleRemoverPacienteCena(pacienteId) {
+        if (!podeEditarClinicaPaciente || !ocorrenciaSelecionada || !editRegulador) return
+        const listaAtual = normalizarPacientesVtr(editRegulador.pacientes_cena)
+        const novaLista = listaAtual.filter((p) => p.id !== pacienteId)
+        const recursosSemPaciente = normalizarRecursosSolicitados(editRegulador.recursos_solicitados).filter(
+            (r) => r.atendido || (r.paciente_id || '') !== pacienteId
+        )
+
+        await persistirPacientesCenaNoBanco(
+            novaLista,
+            recursosSemPaciente,
+            'Paciente removido da cena e sincronizado em tempo real.'
+        )
     }
 
     async function handleAdicionarPacienteNaVtr(emp) {
@@ -1102,36 +1453,92 @@ export default function PainelCentral({ perfil }) {
     }
 
     async function handleAlterarCorVtr(emp, corId, delta) {
-        if (!podeEditarRadio && !podeEditarRegulador) return
-        const atual = normalizarCoresVtr(emp.vitimas_cores)
-        const proximoValor = Math.max(0, (atual[corId] || 0) + delta)
-        const novasCores = { ...atual, [corId]: proximoValor }
+        return executarAlterarCorVtr({
+            perfil,
+            podeEditarRadio,
+            podeEditarRegulador,
+            emp,
+            corId,
+            delta,
+            setSalvandoSecao,
+            setMensagemModal,
+            carregarTudo,
+        })
+    }
 
+    function renderPainelBalancoVitimas(oc, empenhosDaOc, { permitirEditarVtr = false } = {}) {
+        return renderizarPainelBalancoVitimas(oc, empenhosDaOc, {
+            permitirEditarVtr,
+            salvandoSecao,
+            onAlterarCorVtr: (emp, corId, delta) => handleAlterarCorVtr(emp, corId, delta),
+        })
+    }
+
+    async function handleAlternarApoioImediato(tipoApoio) {
+        if (!podeEditarRegulador || !ocorrenciaSelecionada) return
         setSalvandoSecao(true)
         setMensagemModal('')
 
-        const { error } = await supabase
-            .from('ocorrencia_viaturas')
-            .update({
-                vitimas_cores: novasCores,
-                atualizado_em: new Date().toISOString(),
-            })
-            .eq('id', emp.id)
+        const atualPolicia = Boolean(
+            editRegulador?.apoio_policia ?? ocorrenciaSelecionada.apoio_policia
+        )
+        const atualCobom = Boolean(
+            editRegulador?.apoio_cobom_resgate ?? ocorrenciaSelecionada.apoio_cobom_resgate
+        )
 
-        if (!error) {
+        const proximoPolicia = tipoApoio === 'POLICIA' ? !atualPolicia : atualPolicia
+        const proximoCobom = tipoApoio === 'COBOM_RESGATE' ? !atualCobom : atualCobom
+
+        const payloadApoio = {
+            apoio_policia: proximoPolicia,
+            apoio_cobom_resgate: proximoCobom,
+            atualizado_em: new Date().toISOString(),
+        }
+
+        const { error } = await supabase
+            .from('ocorrencias')
+            .update(payloadApoio)
+            .eq('id', ocorrenciaSelecionada.id)
+
+        if (error) {
+            setMensagemModal(`Erro ao enviar aviso de apoio ao Rádio: ${error.message}`)
+        } else {
             await registrarAuditoria({
                 perfil,
-                tabela: 'ocorrencia_viaturas',
-                registroId: emp.id,
+                tabela: 'ocorrencias',
+                registroId: ocorrenciaSelecionada.id,
                 acao: 'EDICAO',
-                campo: `VITIMAS_${corId}_${emp.prefixo}`,
-                valorAnterior: String(atual[corId] || 0),
-                valorNovo: String(proximoValor),
+                campo: tipoApoio === 'POLICIA' ? 'APOIO_POLICIA' : 'APOIO_COBOM_RESGATE',
+                valorNovo:
+                    tipoApoio === 'POLICIA'
+                        ? proximoPolicia
+                            ? 'SOLICITADO AO RÁDIO OPERADOR'
+                            : 'CANCELADO'
+                        : proximoCobom
+                            ? 'SOLICITADO AO RÁDIO OPERADOR'
+                            : 'CANCELADO',
             })
+
+            setEditRegulador((prev) =>
+                prev
+                    ? {
+                        ...prev,
+                        apoio_policia: proximoPolicia,
+                        apoio_cobom_resgate: proximoCobom,
+                    }
+                    : prev
+            )
+
+            const nomeApoio = tipoApoio === 'POLICIA' ? 'APOIO POLÍCIA' : 'APOIO COBOM / RESGATE'
+            const ativoApoio = tipoApoio === 'POLICIA' ? proximoPolicia : proximoCobom
+            setMensagemModal(
+                ativoApoio
+                    ? `Aviso de ${nomeApoio} enviado imediatamente ao Rádio Operador.`
+                    : `Aviso de ${nomeApoio} desativado.`
+            )
             await carregarTudo({ silencioso: true })
-        } else {
-            setMensagemModal(`Erro ao atualizar vítimas na ${emp.prefixo}: ${error.message}`)
         }
+
         setSalvandoSecao(false)
     }
 
@@ -1190,447 +1597,97 @@ export default function PainelCentral({ perfil }) {
         setSalvandoSecao(false)
     }
 
-async function handleEmpenharViatura() {
-        if (!podeEditarRadio || !ocorrenciaSelecionada || !viaturaParaEmpenhar) return
-        const vtrObj = viaturas.find(
-            (v) => v.prefixo.toUpperCase() === viaturaParaEmpenhar.toUpperCase()
-        )
-        if (!vtrObj) return
-
-        const jaVinculada = empenhosDaOcorrencia.some((e) => e.viatura_id === vtrObj.id)
-        if (jaVinculada) {
-            setMensagemModal(`A viatura ${vtrObj.prefixo} já está empenhada nesta ocorrência.`)
-            return
-        }
-
-        setSalvandoSecao(true)
-        setMensagemModal('')
-        const horaAcion = horaAtualHhMm()
-
-        const { data: empCriado, error } = await supabase
-            .from('ocorrencia_viaturas')
-            .insert({
-                ocorrencia_id: ocorrenciaSelecionada.id,
-                viatura_id: vtrObj.id,
-                prefixo: vtrObj.prefixo.toUpperCase(),
-                status_empenho: 'ACIONADA',
-                vitimas_cores: CORES_VAZIAS,
-                pacientes_detalhes: [],
-                km_saida: vtrObj.km_atual || '',
-                h_acionamento: horaAcion,
-                empenhado_por: perfil?.id || null,
-                empenhado_por_nome: (perfil?.nome_completo || '').toUpperCase(),
-            })
-            .select()
-            .single()
-
-        if (error) {
-            setMensagemModal(`Erro ao empenhar viatura: ${error.message}`)
-        } else {
-            await supabase.from('viaturas').update({ status: 'ACIONADA' }).eq('id', vtrObj.id)
-
-            const novoStatusOc =
-                ocorrenciaSelecionada.status_ocorrencia === 'PENDENTE'
-                    ? 'DESPACHADA'
-                    : ocorrenciaSelecionada.status_ocorrencia
-
-            await supabase
-                .from('ocorrencias')
-                .update({
-                    status_ocorrencia: novoStatusOc,
-                    h_acionamento: ocorrenciaSelecionada.h_acionamento || horaAcion,
-                    atualizado_em: new Date().toISOString(),
-                })
-                .eq('id', ocorrenciaSelecionada.id)
-
-            setEditRadio((prev) => (prev ? { ...prev, status_ocorrencia: novoStatusOc } : prev))
-
-            await registrarAuditoria({
-                perfil,
-                tabela: 'ocorrencia_viaturas',
-                registroId: empCriado?.id || ocorrenciaSelecionada.id,
-                acao: 'CRIACAO',
-                campo: 'EMPENHO_VTR',
-                valorNovo: `VTR ${vtrObj.prefixo.toUpperCase()} empenhada na ocorrência ${ocorrenciaSelecionada.numero_ocorrencia}`,
-            })
-
-            const reqsOc = normalizarRecursosSolicitados(ocorrenciaSelecionada.recursos_solicitados)
-            if (reqsOc.length > 0) {
-                const resumoReqs = reqsOc
-                    .map(
-                        (r) =>
-                            `${r.quantidade}x ${r.recurso}${r.paciente_nome ? ` [PAC: ${r.paciente_nome}]` : ''}${r.observacao ? ` (${r.observacao})` : ''}`
-                    )
-                    .join(' | ')
-                await registrarAuditoria({
-                    perfil,
-                    tabela: 'ocorrencia_viaturas',
-                    registroId: empCriado?.id || ocorrenciaSelecionada.id,
-                    acao: 'EDICAO',
-                    campo: `DIRECIONAMENTO_REGULADOR_${vtrObj.prefixo.toUpperCase()}`,
-                    valorNovo: resumoReqs,
-                })
-            }
-
-            setViaturaParaEmpenhar('')
-            setMensagemModal(`Viatura ${vtrObj.prefixo.toUpperCase()} empenhada.`)
-            await carregarTudo({ silencioso: true })
-        }
-
-        setSalvandoSecao(false)
+    async function handleEmpenharViatura(prefixoOverride = null, solicitacaoContexto = null) {
+        return executarEmpenharViatura({
+            perfil,
+            podeEditarRadio,
+            ocorrenciaSelecionada,
+            empenhosDaOcorrencia,
+            viaturas,
+            viaturaParaEmpenhar,
+            setViaturaParaEmpenhar,
+            setEditRadio,
+            setEditRegulador,
+            setOcorrencias,
+            setSalvandoSecao,
+            setMensagemModal,
+            horaAtualHhMm,
+            normalizarRecursosSolicitados,
+            carregarTudo,
+            prefixoOverride,
+            solicitacaoContexto,
+        })
     }
 
     async function handleAtualizarStatusEmpenho(emp, novoStatusEmpenho) {
-        if (!podeEditarRadio) return
-        setSalvandoSecao(true)
-        setMensagemModal('')
-
-        const horaAgora = horaAtualHhMm()
-        const draftAtual = obterDraftVtr(emp)
-        const updatesEmp = {
-            status_empenho: novoStatusEmpenho,
-            atualizado_em: new Date().toISOString(),
-        }
-
-        if (novoStatusEmpenho === 'NO QTH' && !draftAtual.h_chegada_qth) {
-            updatesEmp.h_chegada_qth = horaAgora
-        } else if (novoStatusEmpenho === 'QTI UNIDADE SAUDE' && !draftAtual.h_saida_qth) {
-            updatesEmp.h_saida_qth = horaAgora
-        } else if (novoStatusEmpenho === 'NA UNIDADE SAUDE' && !draftAtual.h_chegada_saude) {
-            updatesEmp.h_chegada_saude = horaAgora
-        } else if (
-            (novoStatusEmpenho === 'QTI BASE QAP' || novoStatusEmpenho === 'QTA') &&
-            !draftAtual.h_encerramento
-        ) {
-            updatesEmp.h_encerramento = horaAgora
-        }
-
-        const { error } = await supabase
-            .from('ocorrencia_viaturas')
-            .update(updatesEmp)
-            .eq('id', emp.id)
-
-        if (!error) {
-            atualizarDraftVtr(emp.id, emp, updatesEmp)
-
-            const statusFrota =
-                novoStatusEmpenho === 'QTI BASE QAP' || novoStatusEmpenho === 'QTA'
-                    ? 'DISPONIVEL'
-                    : novoStatusEmpenho
-
-            await supabase.from('viaturas').update({ status: statusFrota }).eq('id', emp.viatura_id)
-
-            if (ocorrenciaSelecionada) {
-                const proximoStatusOc =
-                    novoStatusEmpenho === 'NO QTH' ||
-                        novoStatusEmpenho === 'QTI UNIDADE SAUDE' ||
-                        novoStatusEmpenho === 'NA UNIDADE SAUDE'
-                        ? 'EM_ANDAMENTO'
-                        : ocorrenciaSelecionada.status_ocorrencia
-
-                const updatesOc = {
-                    status_ocorrencia: proximoStatusOc,
-                    atualizado_em: new Date().toISOString(),
-                }
-                if (novoStatusEmpenho === 'NO QTH' && !ocorrenciaSelecionada.h_chegada_qth) {
-                    updatesOc.h_chegada_qth = horaAgora
-                }
-                if (novoStatusEmpenho === 'NA UNIDADE SAUDE' && !ocorrenciaSelecionada.h_chegada_saude) {
-                    updatesOc.h_chegada_saude = horaAgora
-                }
-
-                await supabase.from('ocorrencias').update(updatesOc).eq('id', ocorrenciaSelecionada.id)
-                setEditRadio((prev) => (prev ? { ...prev, status_ocorrencia: proximoStatusOc } : prev))
-            }
-
-            await registrarAuditoria({
-                perfil,
-                tabela: 'ocorrencia_viaturas',
-                registroId: emp.id,
-                acao: 'EDICAO',
-                campo: 'STATUS_EMPENHO_VTR',
-                valorAnterior: emp.status_empenho,
-                valorNovo: `${emp.prefixo} -> ${novoStatusEmpenho}`,
-            })
-
-            setMensagemModal(`Status da ${emp.prefixo} atualizado para ${novoStatusEmpenho}.`)
-            await carregarTudo({ silencioso: true })
-        }
-
-        setSalvandoSecao(false)
+        return executarAtualizarStatusEmpenho({
+            perfil,
+            podeEditarRadio,
+            ocorrenciaSelecionada,
+            emp,
+            novoStatusEmpenho,
+            obterDraftVtr,
+            atualizarDraftVtr,
+            setEditRadio,
+            setSalvandoSecao,
+            setMensagemModal,
+            horaAtualHhMm,
+            carregarTudo,
+        })
     }
 
     function alterarHorarioEStatusVtr(emp, chaveHorario, novoValor) {
-        const draftAtual = obterDraftVtr(emp)
-        const proximoStatus = inferirStatusPorHorario(
+        return executarAlterarHorarioEStatusVtr({
+            emp,
             chaveHorario,
             novoValor,
-            draftAtual.status_empenho
-        )
-        atualizarDraftVtr(emp.id, emp, {
-            [chaveHorario]: novoValor,
-            status_empenho: proximoStatus,
+            obterDraftVtr,
+            atualizarDraftVtr,
         })
     }
 
     async function handleSalvarHorariosVtr(emp) {
-        if (!podeEditarRadio) return
-        const draft = obterDraftVtr(emp)
-        setSalvandoSecao(true)
-        setMensagemModal('')
-
-        const statusParaSalvar = draft.status_empenho || emp.status_empenho || 'ACIONADA'
-
-        const payloadVtr = {
-            status_empenho: statusParaSalvar,
-            km_saida: (draft.km_saida || '').trim(),
-            km_chegada: (draft.km_chegada || '').trim(),
-            h_acionamento: (draft.h_acionamento || '').trim(),
-            h_saida_base: (draft.h_saida_base || '').trim(),
-            h_chegada_qth: (draft.h_chegada_qth || '').trim(),
-            h_saida_qth: (draft.h_saida_qth || '').trim(),
-            h_chegada_saude: (draft.h_chegada_saude || '').trim(),
-            h_saida_saude: (draft.h_saida_saude || '').trim(),
-            h_encerramento: (draft.h_encerramento || '').trim(),
-            atualizado_em: new Date().toISOString(),
-        }
-
-        const { error } = await supabase
-            .from('ocorrencia_viaturas')
-            .update(payloadVtr)
-            .eq('id', emp.id)
-
-        if (error) {
-            setMensagemModal(`Erro ao salvar horários da ${emp.prefixo}: ${error.message}`)
-        } else {
-            const statusFrota =
-                statusParaSalvar === 'QTI BASE QAP' || statusParaSalvar === 'QTA'
-                    ? 'DISPONIVEL'
-                    : statusParaSalvar
-            await supabase.from('viaturas').update({ status: statusFrota }).eq('id', emp.viatura_id)
-
-            await registrarAuditoria({
-                perfil,
-                tabela: 'ocorrencia_viaturas',
-                registroId: emp.id,
-                acao: 'EDICAO',
-                campo: `TEMPOS_VTR_${emp.prefixo}`,
-                valorNovo: `STATUS:${statusParaSalvar} | ACION:${payloadVtr.h_acionamento || '--:--'} | SAÍDA:${payloadVtr.h_saida_base || '--:--'} | QTH:${payloadVtr.h_chegada_qth || '--:--'} | SAÚDE:${payloadVtr.h_chegada_saude || '--:--'} | ENC:${payloadVtr.h_encerramento || '--:--'}`,
-            })
-            setMensagemModal(
-                `Horários e status (${statusParaSalvar}) da viatura ${emp.prefixo} salvos.`
-            )
-            await carregarTudo({ silencioso: true })
-        }
-
-        setSalvandoSecao(false)
+        return executarSalvarHorariosVtr({
+            perfil,
+            podeEditarRadio,
+            emp,
+            obterDraftVtr,
+            setSalvandoSecao,
+            setMensagemModal,
+            carregarTudo,
+        })
     }
 
     async function handleDesvincularEmpenho(emp) {
-        if (!podeEditarRadio) return
-        setSalvandoSecao(true)
-        const { error } = await supabase.from('ocorrencia_viaturas').delete().eq('id', emp.id)
-
-        if (!error) {
-            await supabase.from('viaturas').update({ status: 'DISPONIVEL' }).eq('id', emp.viatura_id)
-
-            await registrarAuditoria({
-                perfil,
-                tabela: 'ocorrencia_viaturas',
-                registroId: emp.id,
-                acao: 'EXCLUSAO',
-                campo: 'EMPENHO_VTR',
-                valorAnterior: `${emp.prefixo} (${emp.status_empenho})`,
-            })
-
-            setMensagemModal(`Viatura ${emp.prefixo} removida do empenho.`)
-            await carregarTudo({ silencioso: true })
-        }
-        setSalvandoSecao(false)
+        return executarDesvincularEmpenho({
+            perfil,
+            podeEditarRadio,
+            ocorrenciaSelecionada,
+            emp,
+            setEditRegulador,
+            setOcorrencias,
+            setSalvandoSecao,
+            setMensagemModal,
+            horaAtualHhMm,
+            normalizarRecursosSolicitados,
+            carregarTudo,
+        })
     }
 
     async function handleSalvarRadio(statusForcado = null) {
-        if (!podeEditarRadio || !ocorrenciaSelecionada || !editRadio) return
-        setSalvandoSecao(true)
-        setMensagemModal('')
-
-        const statusFinal = statusForcado || editRadio.status_ocorrencia || 'PENDENTE'
-
-        const payload = {
-            status_ocorrencia: statusFinal,
-            codigo_j: (editRadio.codigo_j || '').trim().toUpperCase(),
-            codigo_qta: (editRadio.codigo_qta || '').trim().toUpperCase(),
-            observacao_radio: (editRadio.observacao_radio || '').trim(),
-            atualizado_em: new Date().toISOString(),
-        }
-
-        const { error } = await supabase
-            .from('ocorrencias')
-            .update(payload)
-            .eq('id', ocorrenciaSelecionada.id)
-
-        if (error) {
-            setMensagemModal(`Erro ao salvar despacho do Rádio: ${error.message}`)
-        } else {
-            if (statusFinal === 'FINALIZADA' || statusFinal === 'CANCELADA') {
-                const horaEnc = horaAtualHhMm()
-                for (const emp of empenhosDaOcorrencia) {
-                    if (emp.status_empenho !== 'QTI BASE QAP' && emp.status_empenho !== 'QTA') {
-                        await supabase
-                            .from('ocorrencia_viaturas')
-                            .update({
-                                status_empenho: statusFinal === 'CANCELADA' ? 'QTA' : 'QTI BASE QAP',
-                                h_encerramento: emp.h_encerramento || horaEnc,
-                                atualizado_em: new Date().toISOString(),
-                            })
-                            .eq('id', emp.id)
-
-                        await supabase.from('viaturas').update({ status: 'DISPONIVEL' }).eq('id', emp.viatura_id)
-                    }
-                }
-            }
-
-            await registrarAlteracoesEmLote({
-                perfil,
-                tabela: 'ocorrencias',
-                registroId: ocorrenciaSelecionada.id,
-                anterior: ocorrenciaSelecionada,
-                novo: payload,
-                campos: ['status_ocorrencia', 'codigo_j', 'codigo_qta', 'observacao_radio'],
-            })
-
-            setEditRadio((prev) => (prev ? { ...prev, status_ocorrencia: statusFinal } : prev))
-            setMensagemModal(`Registro do Rádio Operador salvo (${statusFinal}).`)
-            await carregarTudo({ silencioso: true })
-        }
-
-        setSalvandoSecao(false)
-    }
-
-    function renderPainelBalancoVitimas(oc, empenhosDaOc, { permitirEditarVtr = false } = {}) {
-        const balanco = calcularBalancoVitimas(oc, empenhosDaOc)
-        const isMultiplas = balanco.totalEstimado >= 2
-
-        if (!isMultiplas && !oc.protocolo_imv && balanco.embarcadasVtr === 0) {
-            return null
-        }
-
-        return (
-            <div
-                className={`rounded-xl p-3 space-y-2.5 border ${oc.protocolo_imv
-                    ? 'bg-red-950/35 border-qth-red'
-                    : 'bg-amber-950/25 border-qth-yellow/60'
-                    }`}
-            >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-extrabold uppercase flex items-center gap-1.5 text-white">
-                        <ShieldAlert
-                            className={`w-4 h-4 ${oc.protocolo_imv ? 'text-red-400' : 'text-qth-yellow'}`}
-                        />
-                        {oc.protocolo_imv
-                            ? 'PROTOCOLO IMV ATIVO — CONTROLE DE VÍTIMAS E EMBARQUE START'
-                            : `MÚLTIPLAS VÍTIMAS (${balanco.totalEstimado} ESTIMADAS) — BALANÇO OPERACIONAL`}
-                    </span>
-
-                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-extrabold uppercase">
-                        <span className="px-2 py-0.5 rounded bg-slate-800 text-white border border-slate-600">
-                            ESTIMADAS: {balanco.totalEstimado}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-qth-blue/30 text-blue-200 border border-blue-500/50">
-                            EM VTRs: {balanco.embarcadasVtr}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-purple-900/40 text-purple-200 border border-purple-500/40">
-                            EXT / 3ºs: {balanco.meiosProprios + balanco.terceiros + balanco.obitoLocal}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-qth-orange/25 text-orange-200 border border-qth-orange/50">
-                            PENDENTES CENA: {balanco.saldoPendente}
-                        </span>
-                    </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1.5">
-                    {CORES_START.map((cor) => (
-                        <span
-                            key={cor.id}
-                            className={`text-[10px] font-extrabold px-2 py-0.5 rounded border uppercase ${cor.chip}`}
-                        >
-                            {cor.label}: {balanco.totaisCor[cor.id] || 0}
-                        </span>
-                    ))}
-                    {balanco.meiosProprios > 0 && (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600 uppercase">
-                            MEIOS PRÓPRIOS: {balanco.meiosProprios}
-                        </span>
-                    )}
-                    {balanco.terceiros > 0 && (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600 uppercase">
-                            TERCEIROS: {balanco.terceiros}
-                        </span>
-                    )}
-                    {balanco.obitoLocal > 0 && (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600 uppercase">
-                            ÓBITO LOCAL: {balanco.obitoLocal}
-                        </span>
-                    )}
-                </div>
-
-                {empenhosDaOc && empenhosDaOc.length > 0 && (
-                    <div className="space-y-2 pt-1">
-                        {empenhosDaOc.map((emp) => {
-                            const coresEmp = normalizarCoresVtr(emp.vitimas_cores)
-                            const totalEmp = somarCoresVtr(coresEmp)
-                            return (
-                                <div
-                                    key={emp.id}
-                                    className="bg-qth-card/90 border border-slate-700 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-2"
-                                >
-                                    <div>
-                                        <span className="text-xs font-extrabold text-white uppercase">
-                                            {emp.prefixo}
-                                        </span>{' '}
-                                        <span className="text-[10px] font-bold text-slate-400 uppercase">
-                                            ({emp.status_empenho}) • {totalEmp} EMBARCADA(S)
-                                        </span>
-                                    </div>
-
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        {CORES_START.map((cor) => (
-                                            <div
-                                                key={cor.id}
-                                                className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-extrabold ${cor.chip}`}
-                                            >
-                                                <span>{cor.label}:</span>
-                                                <span>{coresEmp[cor.id] || 0}</span>
-                                                {permitirEditarVtr && (
-                                                    <>
-                                                        <button
-                                                            type="button"
-                                                            disabled={salvandoSecao || (coresEmp[cor.id] || 0) <= 0}
-                                                            onClick={() => handleAlterarCorVtr(emp, cor.id, -1)}
-                                                            className="ml-1 px-1.5 py-0.5 rounded bg-black/40 hover:bg-black/70 disabled:opacity-30 cursor-pointer"
-                                                        >
-                                                            -
-                                                        </button>
-                                                        <button
-                                                            type="button"
-                                                            disabled={salvandoSecao}
-                                                            onClick={() => handleAlterarCorVtr(emp, cor.id, 1)}
-                                                            className="px-1.5 py-0.5 rounded bg-black/40 hover:bg-black/70 disabled:opacity-30 cursor-pointer"
-                                                        >
-                                                            +
-                                                        </button>
-                                                    </>
-                                                )}
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )
-                        })}
-                    </div>
-                )}
-            </div>
-        )
+        return executarSalvarRadio({
+            perfil,
+            podeEditarRadio,
+            ocorrenciaSelecionada,
+            empenhosDaOcorrencia,
+            editRadio,
+            statusForcado,
+            setEditRadio,
+            setSalvandoSecao,
+            setMensagemModal,
+            horaAtualHhMm,
+            carregarTudo,
+        })
     }
 
     return (
@@ -1945,1895 +2002,72 @@ async function handleEmpenharViatura() {
             </div>
 
             {/* Modal / Tela Interna da Ocorrência com 4 Abas */}
-            {ocorrenciaSelecionada && editTarm && editRegulador && editRadio && (
-                <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
-                    <div className="bg-qth-card border border-slate-700 rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden shadow-2xl">
-                        <div className="bg-qth-bg border-b border-slate-700 p-4 flex flex-wrap items-center justify-between gap-3">
-                            <div>
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <span className="text-base font-extrabold text-white uppercase">
-                                        OCORRÊNCIA #{ocorrenciaSelecionada.numero_ocorrencia || 'S/N'}
-                                    </span>
-                                    <span
-                                        className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border uppercase ${obterMetaPrioridade(ocorrenciaSelecionada.prioridade).badge
-                                            }`}
-                                    >
-                                        PRIORIDADE: {obterMetaPrioridade(ocorrenciaSelecionada.prioridade).label}
-                                    </span>
-                                    <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-slate-800 text-qth-orange border border-slate-600 uppercase">
-                                        STATUS: {ocorrenciaSelecionada.status_ocorrencia}
-                                    </span>
-                                    {ocorrenciaSelecionada.protocolo_imv && (
-                                        <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-qth-red text-white uppercase">
-                                            PROTOCOLO IMV ATIVO
-                                        </span>
-                                    )}
-                                </div>
-                                <p className="text-[11px] text-slate-400 mt-0.5 uppercase">
-                                    {ocorrenciaSelecionada.tipo_atendimento} •{' '}
-                                    {formatarEnderecoOcorrencia(ocorrenciaSelecionada)}
-                                </p>
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                                {construirUrlRota(ocorrenciaSelecionada) && (
-                                    <a
-                                        href={construirUrlRota(ocorrenciaSelecionada)}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="bg-qth-blue hover:bg-blue-700 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5"
-                                    >
-                                        <Navigation className="w-3.5 h-3.5" />
-                                        GERAR ROTA GPS
-                                    </a>
-                                )}
-                                <button
-                                    type="button"
-                                    onClick={fecharModalOcorrencia}
-                                    className="p-2 rounded-lg bg-slate-800 hover:bg-qth-red text-slate-200 hover:text-white cursor-pointer"
-                                    title="Fechar ocorrência"
-                                >
-                                    <X className="w-4 h-4" />
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="bg-qth-bg/60 border-b border-slate-700 px-3 pt-2 flex flex-wrap gap-1.5">
-                            {[
-                                { id: 'RESUMO', label: 'RESUMO', icon: ClipboardList, perm: true },
-                                {
-                                    id: 'TARM',
-                                    label: 'TARM',
-                                    icon: PhoneCall,
-                                    perm: podeCriarOuEditarTarm,
-                                },
-                                {
-                                    id: 'REGULADOR',
-                                    label: 'REGULADOR',
-                                    icon: Stethoscope,
-                                    perm: podeEditarClinicaPaciente,
-                                },
-                                {
-                                    id: 'RADIO_OPERADOR',
-                                    label: 'RÁDIO OPERADOR',
-                                    icon: Truck,
-                                    perm: podeEditarRadio,
-                                },
-                            ].map((tab) => {
-                                const IconComp = tab.icon
-                                const ativa = abaInterna === tab.id
-                                return (
-                                    <button
-                                        key={tab.id}
-                                        type="button"
-                                        onClick={() => {
-                                            setMensagemModal('')
-                                            setAbaInterna(tab.id)
-                                        }}
-                                        className={`px-3.5 py-2 rounded-t-xl text-xs font-extrabold uppercase flex items-center gap-1.5 cursor-pointer border-t border-x transition-colors ${ativa
-                                            ? 'bg-qth-card text-qth-orange border-slate-600'
-                                            : 'bg-transparent text-slate-400 hover:text-slate-200 border-transparent'
-                                            }`}
-                                    >
-                                        <IconComp className="w-3.5 h-3.5" />
-                                        <span>{tab.label}</span>
-                                        {!tab.perm && (
-                                            <Lock
-                                                className="w-3 h-3 text-slate-500"
-                                                title="Somente visualização para o seu cargo"
-                                            />
-                                        )}
-                                    </button>
-                                )
-                            })}
-                        </div>
-
-                        {mensagemModal && (
-                            <div className="mx-4 mt-3 bg-qth-blue/20 border border-blue-500/40 text-blue-200 text-xs font-semibold px-3 py-2 rounded-lg flex items-center justify-between">
-                                <span>{mensagemModal}</span>
-                                <button
-                                    type="button"
-                                    onClick={() => setMensagemModal('')}
-                                    className="text-blue-300 hover:text-white cursor-pointer"
-                                >
-                                    <X className="w-3.5 h-3.5" />
-                                </button>
-                            </div>
-                        )}
-
-                        <div className="p-4 overflow-y-auto space-y-4 flex-1">
-                            {/* ABA 1: RESUMO */}
-                            {abaInterna === 'RESUMO' && (
-                                <div className="space-y-4">
-                                    {renderPainelBalancoVitimas(ocorrenciaSelecionada, empenhosDaOcorrencia, {
-                                        permitirEditarVtr: false,
-                                    })}
-
-                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                        <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-1">
-                                            <p className="text-[10px] font-extrabold text-qth-orange uppercase">
-                                                Chamado & Solicitante (TARM)
-                                            </p>
-                                            <p className="text-xs font-bold text-white uppercase">
-                                                {ocorrenciaSelecionada.solicitante_nome || 'NÃO INFORMADO'}
-                                            </p>
-                                            <p className="text-[11px] text-slate-300">
-                                                TEL: {ocorrenciaSelecionada.solicitante_telefone || '—'} • VÍTIMAS:{' '}
-                                                {ocorrenciaSelecionada.numero_vitimas || 1}
-                                            </p>
-                                            <p className="text-[11px] text-slate-300 uppercase">
-                                                MOTIVO: {ocorrenciaSelecionada.motivo || '—'}
-                                            </p>
-                                            {ocorrenciaSelecionada.coordenadas && (
-                                                <p className="text-[11px] text-sky-300 font-mono">
-                                                    GPS: {ocorrenciaSelecionada.coordenadas}
-                                                </p>
-                                            )}
-                                        </div>
-
-                                        <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-1">
-                                            <p className="text-[10px] font-extrabold text-qth-orange uppercase">
-                                                Regulação Médica
-                                            </p>
-                                            <p className="text-xs font-bold text-white uppercase">
-                                                RISCO: {ocorrenciaSelecionada.classificacao_risco || '—'} • RECURSO:{' '}
-                                                {ocorrenciaSelecionada.recurso_indicado || 'A DEFINIR'}
-                                            </p>
-                                            <p className="text-[11px] text-slate-300 uppercase">
-                                                HIPÓTESE: {ocorrenciaSelecionada.hipotese_diagnostica || '—'}
-                                            </p>
-                                            <p className="text-[11px] text-slate-300">
-                                                QUADRO:{' '}
-                                                {ocorrenciaSelecionada.quadro_clinico || 'Sem quadro clínico registrado.'}
-                                            </p>
-                                        </div>
-
-                                        <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-1">
-                                            <p className="text-[10px] font-extrabold text-qth-orange uppercase">
-                                                Despacho & Desfecho (Rádio)
-                                            </p>
-                                            <p className="text-xs font-bold text-white uppercase">
-                                                VTRS: {empenhosDaOcorrencia.length} EMPENHADA(S)
-                                            </p>
-                                            <p className="text-[11px] text-green-400 font-bold uppercase">
-                                                CÓDIGO J: {ocorrenciaSelecionada.codigo_j || 'PENDENTE'}
-                                            </p>
-                                            <p className="text-[11px] text-yellow-300 font-bold uppercase">
-                                                QTA: {ocorrenciaSelecionada.codigo_qta || 'PENDENTE'}
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    {empenhosDaOcorrencia.some(
-                                        (e) => normalizarPacientesVtr(e.pacientes_detalhes).length > 0
-                                    ) && (
-                                            <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-2.5">
-                                                <h4 className="text-xs font-extrabold text-white uppercase">
-                                                    Prontuários e Evoluções por VTR / Paciente
-                                                </h4>
-                                                {empenhosDaOcorrencia.map((emp) => {
-                                                    const pacs = normalizarPacientesVtr(emp.pacientes_detalhes)
-                                                    if (pacs.length === 0) return null
-                                                    return (
-                                                        <div key={emp.id} className="space-y-2">
-                                                            <p className="text-[11px] font-extrabold text-qth-orange uppercase">
-                                                                {emp.prefixo} ({emp.status_empenho})
-                                                            </p>
-                                                            {pacs.map((pac) => (
-                                                                <div
-                                                                    key={pac.id}
-                                                                    className="bg-qth-card border border-slate-700 rounded-lg p-2.5 space-y-1"
-                                                                >
-                                                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                                                        <span className="text-xs font-extrabold text-white uppercase">
-                                                                            {pac.nome}
-                                                                            {pac.idade
-                                                                                ? ` • ${pac.idade}${pac.tipo_idade ? ` ${pac.tipo_idade}` : ''}`
-                                                                                : ''}
-                                                                            {pac.sexo ? ` • ${pac.sexo}` : ''}
-                                                                        </span>
-                                                                        {pac.cor_start && (
-                                                                            <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-slate-800 text-qth-orange border border-slate-600 uppercase">
-                                                                                COR: {pac.cor_start}
-                                                                            </span>
-                                                                        )}
-                                                                    </div>
-                                                                    {pac.destino && (
-                                                                        <p className="text-[11px] text-slate-300 uppercase">
-                                                                            DESTINO: {pac.destino}
-                                                                        </p>
-                                                                    )}
-                                                                    {pac.quadro_clinico && (
-                                                                        <p className="text-[11px] text-slate-200">
-                                                                            <strong>Quadro:</strong> {pac.quadro_clinico}
-                                                                        </p>
-                                                                    )}
-                                                                    {Array.isArray(pac.evolucoes) && pac.evolucoes.length > 0 && (
-                                                                        <div className="pt-1 space-y-1">
-                                                                            {pac.evolucoes.map((ev) => (
-                                                                                <div
-                                                                                    key={ev.id}
-                                                                                    className="text-[11px] bg-qth-bg/70 rounded p-2 border border-slate-700/60"
-                                                                                >
-                                                                                    <span className="text-[10px] font-bold text-slate-400">
-                                                                                        {ev.autor_nome} ({ev.autor_cargo}) •{' '}
-                                                                                        {ev.criado_em
-                                                                                            ? new Date(ev.criado_em).toLocaleString('pt-BR')
-                                                                                            : ''}
-                                                                                    </span>
-                                                                                    <p className="text-white mt-0.5">{ev.texto}</p>
-                                                                                </div>
-                                                                            ))}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )
-                                                })}
-                                            </div>
-                                        )}
-
-                                    <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-2">
-                                        <h4 className="text-xs font-extrabold text-white uppercase">
-                                            Evoluções Gerais da Regulação
-                                        </h4>
-                                        {evolucoesDaOcorrencia.length === 0 ? (
-                                            <p className="text-xs text-slate-400">
-                                                Nenhuma evolução geral registrada ainda.
-                                            </p>
-                                        ) : (
-                                            <div className="space-y-2">
-                                                {evolucoesDaOcorrencia.map((evo) => (
-                                                    <div
-                                                        key={evo.id}
-                                                        className="bg-qth-card border border-slate-700/80 rounded-lg p-2.5 space-y-1"
-                                                    >
-                                                        <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400">
-                                                            <span className="font-bold text-qth-orange uppercase">
-                                                                {evo.autor_nome || 'EQUIPE'} ({evo.autor_cargo || 'REGULADOR'})
-                                                            </span>
-                                                            <span>{new Date(evo.criado_em).toLocaleString('pt-BR')}</span>
-                                                        </div>
-                                                        <p className="text-xs text-slate-100 whitespace-pre-line">
-                                                            {evo.evolucao_texto}
-                                                        </p>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* ABA 2: TARM */}
-                            {abaInterna === 'TARM' && (
-                                <div className="space-y-4">
-                                    {!podeCriarOuEditarTarm && (
-                                        <div className="bg-yellow-500/10 border border-yellow-500/40 text-yellow-200 text-xs p-2.5 rounded-lg flex items-center gap-2">
-                                            <Lock className="w-4 h-4 shrink-0" />
-                                            <span>
-                                                Apenas TARM, Médicos Reguladores, Coordenadores e Gestores podem editar os dados do TARM.
-                                            </span>
-                                        </div>
-                                    )}
-
-                                    <div className="flex flex-wrap items-center gap-1.5">
-                                        <span className="text-[11px] font-bold text-slate-300 uppercase mr-1">
-                                            Prioridade:
-                                        </span>
-                                        {PRIORIDADES.map((prio) => (
-                                            <button
-                                                key={prio.id}
-                                                type="button"
-                                                disabled={!podeCriarOuEditarTarm}
-                                                onClick={() => setEditTarm({ ...editTarm, prioridade: prio.id })}
-                                                className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold uppercase border cursor-pointer disabled:opacity-60 ${editTarm.prioridade === prio.id
-                                                    ? prio.btnAtivo
-                                                    : 'bg-qth-bg text-slate-300 border-slate-700'
-                                                    }`}
-                                            >
-                                                {prio.label}
-                                            </button>
-                                        ))}
-                                    </div>
-
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Nº Ocorrência
-                                            </label>
-                                            <input
-                                                type="text"
-                                                disabled={!podeCriarOuEditarTarm}
-                                                value={editTarm.numero_ocorrencia || ''}
-                                                onChange={(e) =>
-                                                    setEditTarm({
-                                                        ...editTarm,
-                                                        numero_ocorrencia: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-bold text-white uppercase disabled:opacity-60"
-                                            />
-                                        </div>
-
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Solicitante
-                                            </label>
-                                            <input
-                                                type="text"
-                                                disabled={!podeCriarOuEditarTarm}
-                                                value={editTarm.solicitante_nome || ''}
-                                                onChange={(e) =>
-                                                    setEditTarm({
-                                                        ...editTarm,
-                                                        solicitante_nome: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                            />
-                                        </div>
-
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Telefone Solicitante
-                                            </label>
-                                            <input
-                                                type="text"
-                                                disabled={!podeCriarOuEditarTarm}
-                                                value={editTarm.solicitante_telefone || ''}
-                                                onChange={(e) =>
-                                                    setEditTarm({
-                                                        ...editTarm,
-                                                        solicitante_telefone: e.target.value,
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                                            />
-                                        </div>
-
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Nº de Vítimas
-                                            </label>
-                                            <input
-                                                type="number"
-                                                min={1}
-                                                disabled={!podeCriarOuEditarTarm}
-                                                value={editTarm.numero_vitimas || 1}
-                                                onChange={(e) =>
-                                                    setEditTarm({ ...editTarm, numero_vitimas: e.target.value })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                                            />
-                                        </div>
-
-                                        <SelectPesquisavel
-                                            label="Natureza"
-                                            opcoes={NATUREZAS_ATENDIMENTO}
-                                            valor={editTarm.tipo_atendimento || 'PRIMÁRIO'}
-                                            disabled={!podeCriarOuEditarTarm}
-                                            onChange={(val) =>
-                                                setEditTarm({ ...editTarm, tipo_atendimento: val })
-                                            }
-                                        />
-
-                                        <SelectPesquisavel
-                                            label="Tipo de Local"
-                                            opcoes={TIPOS_LOCAL}
-                                            valor={editTarm.tipo_local || 'DOMICÍLIO'}
-                                            disabled={!podeCriarOuEditarTarm}
-                                            onChange={(val) => setEditTarm({ ...editTarm, tipo_local: val })}
-                                        />
-
-                                        <div className="sm:col-span-2">
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Motivo
-                                            </label>
-                                            <input
-                                                type="text"
-                                                disabled={!podeCriarOuEditarTarm}
-                                                value={editTarm.motivo || ''}
-                                                onChange={(e) =>
-                                                    setEditTarm({ ...editTarm, motivo: e.target.value.toUpperCase() })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                            />
-                                        </div>
-                                    </div>
-
-                                    {editTarm.tipo_atendimento === 'PRIMÁRIO' ? (
-                                        <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-3">
-                                            <div className="flex items-center gap-3">
-                                                <span className="text-[11px] font-bold text-qth-orange uppercase">
-                                                    Tipo de Via:
-                                                </span>
-                                                {TIPOS_VIA.map((v) => (
-                                                    <button
-                                                        key={v}
-                                                        type="button"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        onClick={() => {
-                                                            setEditTarm({ ...editTarm, tipo_via: v })
-                                                        }}
-                                                        className={`px-2.5 py-1 rounded text-xs font-bold cursor-pointer disabled:opacity-60 ${editTarm.tipo_via === v
-                                                            ? 'bg-qth-orange text-white'
-                                                            : 'bg-qth-card text-slate-300'
-                                                            }`}
-                                                    >
-                                                        {v}
-                                                    </button>
-                                                ))}
-                                            </div>
-
-
-                                            <BlocoLocalizacaoRapida
-                                                dados={editTarm}
-                                                setDados={setEditTarm}
-                                                desabilitado={!podeCriarOuEditarTarm}
-                                                resetKey={ocorrenciaSelecionada?.id || ''}
-                                            />
-
-                                            {editTarm.tipo_via === 'Urbana' ? (
-                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="VIA 1"
-                                                        value={editTarm.via1 || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                via1: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="lg:col-span-2 bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="VIA 2 / CRUZAMENTO"
-                                                        value={editTarm.via2 || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                via2: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="NÚMERO"
-                                                        value={editTarm.numero_end || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                numero_end: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="BAIRRO"
-                                                        value={editTarm.bairro || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                bairro: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="PONTO DE REFERÊNCIA"
-                                                        value={editTarm.ponto_referencia || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                ponto_referencia: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="UF"
-                                                        opcoes={listaEstados}
-                                                        valor={editTarm.estado || 'PR'}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        onChange={(uf) =>
-                                                            setEditTarm({ ...editTarm, estado: uf, cidade_urb: '' })
-                                                        }
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="Cidade"
-                                                        opcoes={cidadesEditTarmUrb}
-                                                        valor={editTarm.cidade_urb || ''}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        permiteTextoLivre={true}
-                                                        onChange={(cid) =>
-                                                            setEditTarm({ ...editTarm, cidade_urb: cid })
-                                                        }
-                                                    />
-                                                </div>
-                                            ) : (
-                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="PREFIXO (BR / PR)"
-                                                        value={editTarm.rodovia_jurisdicao || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                rodovia_jurisdicao: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="CÓDIGO RODOVIA"
-                                                        value={editTarm.rodovia_codigo || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                rodovia_codigo: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="KM"
-                                                        value={editTarm.rodovia_km || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({ ...editTarm, rodovia_km: e.target.value })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="PONTO DE REFERÊNCIA"
-                                                        value={editTarm.ponto_referencia || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                ponto_referencia: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="UF Rodovia"
-                                                        opcoes={listaEstados}
-                                                        valor={editTarm.rodovia_uf || 'PR'}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        onChange={(uf) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                rodovia_uf: uf,
-                                                                rodovia_cidade: '',
-                                                            })
-                                                        }
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="Município Rodovia"
-                                                        opcoes={cidadesEditTarmRod}
-                                                        valor={editTarm.rodovia_cidade || ''}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        permiteTextoLivre={true}
-                                                        onChange={(cid) =>
-                                                            setEditTarm({ ...editTarm, rodovia_cidade: cid })
-                                                        }
-                                                    />
-                                                </div>
-                                            )}
-                                        </div>
-                                    ) : (
-                                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                                            <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-2">
-                                                <p className="text-[11px] font-bold text-qth-orange uppercase">
-                                                    Origem
-                                                </p>
-                                                <input
-                                                    type="text"
-                                                    disabled={!podeCriarOuEditarTarm}
-                                                    placeholder="INSTITUIÇÃO ORIGEM"
-                                                    value={editTarm.origem_instituicao || ''}
-                                                    onChange={(e) =>
-                                                        setEditTarm({
-                                                            ...editTarm,
-                                                            origem_instituicao: e.target.value.toUpperCase(),
-                                                        })
-                                                    }
-                                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                />
-                                                <div className="grid grid-cols-3 gap-2">
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="RUA"
-                                                        value={editTarm.origem_rua || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                origem_rua: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="col-span-2 bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="Nº"
-                                                        value={editTarm.origem_numero || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                origem_numero: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                </div>
-                                                <div className="grid grid-cols-3 gap-2">
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="BAIRRO"
-                                                        value={editTarm.origem_bairro || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                origem_bairro: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="UF"
-                                                        opcoes={listaEstados}
-                                                        valor={editTarm.origem_uf || 'PR'}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        onChange={(uf) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                origem_uf: uf,
-                                                                origem_cidade: '',
-                                                            })
-                                                        }
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="Cidade"
-                                                        opcoes={cidadesEditTarmOrig}
-                                                        valor={editTarm.origem_cidade || ''}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        permiteTextoLivre={true}
-                                                        onChange={(cid) =>
-                                                            setEditTarm({ ...editTarm, origem_cidade: cid })
-                                                        }
-                                                    />
-                                                </div>
-                                            </div>
-
-                                            <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-2">
-                                                <p className="text-[11px] font-bold text-qth-orange uppercase">
-                                                    Destino
-                                                </p>
-                                                <input
-                                                    type="text"
-                                                    disabled={!podeCriarOuEditarTarm}
-                                                    placeholder="INSTITUIÇÃO DESTINO"
-                                                    value={editTarm.destino_instituicao || ''}
-                                                    onChange={(e) =>
-                                                        setEditTarm({
-                                                            ...editTarm,
-                                                            destino_instituicao: e.target.value.toUpperCase(),
-                                                        })
-                                                    }
-                                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                />
-                                                <div className="grid grid-cols-3 gap-2">
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="RUA"
-                                                        value={editTarm.destino_rua || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                destino_rua: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="col-span-2 bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="Nº"
-                                                        value={editTarm.destino_numero || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                destino_numero: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                </div>
-                                                <div className="grid grid-cols-3 gap-2">
-                                                    <input
-                                                        type="text"
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        placeholder="BAIRRO"
-                                                        value={editTarm.destino_bairro || ''}
-                                                        onChange={(e) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                destino_bairro: e.target.value.toUpperCase(),
-                                                            })
-                                                        }
-                                                        className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="UF"
-                                                        opcoes={listaEstados}
-                                                        valor={editTarm.destino_uf || 'PR'}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        onChange={(uf) =>
-                                                            setEditTarm({
-                                                                ...editTarm,
-                                                                destino_uf: uf,
-                                                                destino_cidade: '',
-                                                            })
-                                                        }
-                                                    />
-                                                    <SelectPesquisavel
-                                                        label="Cidade"
-                                                        opcoes={cidadesEditTarmDest}
-                                                        valor={editTarm.destino_cidade || ''}
-                                                        disabled={!podeCriarOuEditarTarm}
-                                                        permiteTextoLivre={true}
-                                                        onChange={(cid) =>
-                                                            setEditTarm({ ...editTarm, destino_cidade: cid })
-                                                        }
-                                                    />
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-2.5">
-                                        <p className="text-[11px] font-bold text-qth-orange uppercase">
-                                            Dados do Paciente
-                                        </p>
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                                            <input
-                                                type="text"
-                                                disabled={!podeCriarOuEditarTarm}
-                                                placeholder="NOME DO PACIENTE"
-                                                value={editTarm.nome_paciente || ''}
-                                                onChange={(e) =>
-                                                    setEditTarm({
-                                                        ...editTarm,
-                                                        nome_paciente: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                            />
-                                            <input
-                                                type="text"
-                                                disabled={!podeCriarOuEditarTarm}
-                                                placeholder="IDADE"
-                                                value={editTarm.idade_paciente || ''}
-                                                onChange={(e) =>
-                                                    setEditTarm({
-                                                        ...editTarm,
-                                                        idade_paciente: e.target.value.replace(/\D/g, '').slice(0, 3),
-                                                    })
-                                                }
-                                                className="bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                                            />
-                                            <SelectPesquisavel
-                                                label="Tipo Idade"
-                                                opcoes={TIPOS_IDADE}
-                                                valor={editTarm.tipo_idade_paciente || ''}
-                                                placeholder="SELECIONE..."
-                                                disabled={!podeCriarOuEditarTarm}
-                                                onChange={(val) =>
-                                                    setEditTarm({ ...editTarm, tipo_idade_paciente: val })
-                                                }
-                                            />
-                                            <SelectPesquisavel
-                                                label="Sexo"
-                                                opcoes={SEXOS_PACIENTE}
-                                                valor={editTarm.sexo_paciente || ''}
-                                                placeholder="SELECIONE..."
-                                                disabled={!podeCriarOuEditarTarm}
-                                                onChange={(val) =>
-                                                    setEditTarm({ ...editTarm, sexo_paciente: val })
-                                                }
-                                            />
-                                        </div>
-                                    </div>
-
-                                    {podeCriarOuEditarTarm && (
-                                        <div className="flex justify-end">
-                                            <button
-                                                type="button"
-                                                disabled={salvandoSecao}
-                                                onClick={handleSalvarTarm}
-                                                className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer"
-                                            >
-                                                <Save className="w-3.5 h-3.5" />
-                                                {salvandoSecao ? 'SALVANDO...' : 'SALVAR DADOS TARM'}
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-
-                            {/* ABA 3: REGULADOR */}
-                            {abaInterna === 'REGULADOR' && (
-                                <div className="space-y-4">
-                                    {!podeEditarClinicaPaciente && (
-                                        <div className="bg-yellow-500/10 border border-yellow-500/40 text-yellow-200 text-xs p-2.5 rounded-lg flex items-center gap-2">
-                                            <Lock className="w-4 h-4 shrink-0" />
-                                            <span>
-                                                Seu cargo possui acesso apenas de visualização nesta aba.
-                                            </span>
-                                        </div>
-                                    )}
-
-                                    <div className="bg-qth-bg/75 border border-slate-700 rounded-xl p-3.5 space-y-3">
-                                        <div className="flex flex-wrap items-center justify-between gap-2">
-                                            <div className="flex flex-wrap items-center gap-1.5">
-                                                <span className="text-[11px] font-bold text-slate-300 uppercase mr-1">
-                                                    Prioridade:
-                                                </span>
-                                                {PRIORIDADES.map((prio) => (
-                                                    <button
-                                                        key={prio.id}
-                                                        type="button"
-                                                        disabled={!podeEditarRegulador}
-                                                        onClick={() =>
-                                                            setEditRegulador({ ...editRegulador, prioridade: prio.id })
-                                                        }
-                                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold uppercase border cursor-pointer disabled:opacity-60 ${editRegulador.prioridade === prio.id
-                                                            ? prio.btnAtivo
-                                                            : 'bg-qth-card text-slate-300 border-slate-700'
-                                                            }`}
-                                                    >
-                                                        {prio.label}
-                                                    </button>
-                                                ))}
-                                            </div>
-
-                                            <button
-                                                type="button"
-                                                disabled={!podeEditarRegulador}
-                                                onClick={() =>
-                                                    setEditRegulador({
-                                                        ...editRegulador,
-                                                        protocolo_imv: !editRegulador.protocolo_imv,
-                                                    })
-                                                }
-                                                className={`px-3.5 py-2 rounded-lg text-xs font-extrabold uppercase border cursor-pointer disabled:opacity-60 transition-colors ${editRegulador.protocolo_imv
-                                                    ? 'bg-qth-red text-white border-red-300'
-                                                    : 'bg-qth-card text-slate-200 border-slate-600 hover:border-qth-red'
-                                                    }`}
-                                            >
-                                                {editRegulador.protocolo_imv
-                                                    ? 'PROTOCOLO IMV: ATIVO (CLIQUE PARA DESATIVAR)'
-                                                    : 'ATIVAR PROTOCOLO IMV'}
-                                            </button>
-                                        </div>
-
-                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                            <div>
-                                                <label className="block text-[10px] font-bold text-slate-300 mb-1 uppercase">
-                                                    Total Estimado na Cena
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    min={1}
-                                                    disabled={!podeEditarRegulador}
-                                                    value={editRegulador.numero_vitimas || 1}
-                                                    onChange={(e) =>
-                                                        setEditRegulador({
-                                                            ...editRegulador,
-                                                            numero_vitimas: e.target.value,
-                                                        })
-                                                    }
-                                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-bold text-white disabled:opacity-60"
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-[10px] font-bold text-slate-300 mb-1 uppercase">
-                                                    Meios Próprios / Recusa
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    min={0}
-                                                    disabled={!podeEditarRegulador}
-                                                    value={editRegulador.vitimas_meios_proprios || 0}
-                                                    onChange={(e) =>
-                                                        setEditRegulador({
-                                                            ...editRegulador,
-                                                            vitimas_meios_proprios: e.target.value,
-                                                        })
-                                                    }
-                                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-[10px] font-bold text-slate-300 mb-1 uppercase">
-                                                    Terceiros / Apoio Sem App
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    min={0}
-                                                    disabled={!podeEditarRegulador}
-                                                    value={editRegulador.vitimas_terceiros || 0}
-                                                    onChange={(e) =>
-                                                        setEditRegulador({
-                                                            ...editRegulador,
-                                                            vitimas_terceiros: e.target.value,
-                                                        })
-                                                    }
-                                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-[10px] font-bold text-slate-300 mb-1 uppercase">
-                                                    Óbito no Local (Sem Remoção)
-                                                </label>
-                                                <input
-                                                    type="number"
-                                                    min={0}
-                                                    disabled={!podeEditarRegulador}
-                                                    value={editRegulador.vitimas_obito_local || 0}
-                                                    onChange={(e) =>
-                                                        setEditRegulador({
-                                                            ...editRegulador,
-                                                            vitimas_obito_local: e.target.value,
-                                                        })
-                                                    }
-                                                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-                                                />
-                                            </div>
-                                        </div>
-
-                                        {renderPainelBalancoVitimas(
-                                            {
-                                                ...ocorrenciaSelecionada,
-                                                protocolo_imv: editRegulador.protocolo_imv,
-                                                numero_vitimas: editRegulador.numero_vitimas,
-                                                vitimas_meios_proprios: editRegulador.vitimas_meios_proprios,
-                                                vitimas_terceiros: editRegulador.vitimas_terceiros,
-                                                vitimas_obito_local: editRegulador.vitimas_obito_local,
-                                            },
-                                            empenhosDaOcorrencia,
-                                            { permitirEditarVtr: podeEditarRegulador }
-                                        )}
-                                    </div>
-
-                                    {/* Prontuários e Evoluções por VTR e por Paciente */}
-                                    <div className="bg-qth-bg/75 border border-slate-700 rounded-xl p-3.5 space-y-3">
-                                        <div className="flex flex-wrap items-center justify-between gap-2">
-                                            <h4 className="text-xs font-extrabold text-qth-orange uppercase flex items-center gap-1.5">
-                                                <FileText className="w-4 h-4" />
-                                                Prontuários e Evoluções por VTR e por Paciente
-                                            </h4>
-                                            <span className="text-[10px] text-slate-400 uppercase">
-                                                Individualizado mesmo com múltiplos pacientes da mesma cor na VTR
-                                            </span>
-                                        </div>
-
-                                        {empenhosDaOcorrencia.length === 0 ? (
-                                            <p className="text-xs text-slate-400">
-                                                Nenhuma viatura empenhada nesta ocorrência ainda.
-                                            </p>
-                                        ) : (
-                                            <div className="space-y-3">
-                                                {empenhosDaOcorrencia.map((emp) => {
-                                                    const draftVtr = obterDraftVtr(emp)
-                                                    const pacientesVtr = normalizarPacientesVtr(
-                                                        draftVtr.pacientes_detalhes
-                                                    )
-                                                    const formNovoPac = novoPacientePorVtr[emp.id] || {
-                                                        nome: '',
-                                                        idade: '',
-                                                        tipo_idade: '',
-                                                        sexo: '',
-                                                        cor_start: '',
-                                                        destino: '',
-                                                        quadro_clinico: '',
-                                                    }
-
-                                                    return (
-                                                        <div
-                                                            key={emp.id}
-                                                            className="bg-qth-card border border-slate-700 rounded-xl p-3 space-y-3"
-                                                        >
-                                                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/70 pb-2">
-                                                                <span className="text-xs font-extrabold text-white uppercase">
-                                                                    {emp.prefixo} ({emp.status_empenho}) • {pacientesVtr.length}{' '}
-                                                                    PACIENTE(S) CADASTRADO(S)
-                                                                </span>
-                                                            </div>
-
-                                                            {podeEditarClinicaPaciente && (
-                                                                <div className="bg-qth-bg/70 border border-slate-700/80 rounded-lg p-2.5 space-y-2">
-                                                                    <p className="text-[10px] font-extrabold text-sky-300 uppercase flex items-center gap-1">
-                                                                        <UserPlus className="w-3.5 h-3.5" />
-                                                                        Adicionar Paciente na {emp.prefixo}
-                                                                    </p>
-                                                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2">
-                                                                        <input
-                                                                            type="text"
-                                                                            placeholder="NOME / IDENTIFICAÇÃO"
-                                                                            value={formNovoPac.nome}
-                                                                            onChange={(e) =>
-                                                                                setNovoPacientePorVtr((prev) => ({
-                                                                                    ...prev,
-                                                                                    [emp.id]: {
-                                                                                        ...formNovoPac,
-                                                                                        nome: e.target.value.toUpperCase(),
-                                                                                    },
-                                                                                }))
-                                                                            }
-                                                                            className="lg:col-span-2 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase"
-                                                                        />
-                                                                        <input
-                                                                            type="text"
-                                                                            placeholder="IDADE"
-                                                                            value={formNovoPac.idade}
-                                                                            onChange={(e) =>
-                                                                                setNovoPacientePorVtr((prev) => ({
-                                                                                    ...prev,
-                                                                                    [emp.id]: {
-                                                                                        ...formNovoPac,
-                                                                                        idade: e.target.value.replace(/\D/g, '').slice(0, 3),
-                                                                                    },
-                                                                                }))
-                                                                            }
-                                                                            className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white"
-                                                                        />
-                                                                        <SelectPesquisavel
-                                                                            opcoes={TIPOS_IDADE}
-                                                                            valor={formNovoPac.tipo_idade}
-                                                                            placeholder="TIPO IDADE..."
-                                                                            onChange={(val) =>
-                                                                                setNovoPacientePorVtr((prev) => ({
-                                                                                    ...prev,
-                                                                                    [emp.id]: { ...formNovoPac, tipo_idade: val },
-                                                                                }))
-                                                                            }
-                                                                        />
-                                                                        <SelectPesquisavel
-                                                                            opcoes={SEXOS_PACIENTE}
-                                                                            valor={formNovoPac.sexo}
-                                                                            placeholder="SEXO..."
-                                                                            onChange={(val) =>
-                                                                                setNovoPacientePorVtr((prev) => ({
-                                                                                    ...prev,
-                                                                                    [emp.id]: { ...formNovoPac, sexo: val },
-                                                                                }))
-                                                                            }
-                                                                        />
-                                                                        <SelectPesquisavel
-                                                                            opcoes={CORES_START.map((c) => c.id)}
-                                                                            valor={formNovoPac.cor_start}
-                                                                            placeholder="COR START..."
-                                                                            onChange={(val) =>
-                                                                                setNovoPacientePorVtr((prev) => ({
-                                                                                    ...prev,
-                                                                                    [emp.id]: { ...formNovoPac, cor_start: val },
-                                                                                }))
-                                                                            }
-                                                                        />
-                                                                    </div>
-
-                                                                    <div className="flex flex-wrap items-center gap-2">
-                                                                        <input
-                                                                            type="text"
-                                                                            placeholder="DESTINO / UNIDADE DE SAÚDE"
-                                                                            value={formNovoPac.destino}
-                                                                            onChange={(e) =>
-                                                                                setNovoPacientePorVtr((prev) => ({
-                                                                                    ...prev,
-                                                                                    [emp.id]: {
-                                                                                        ...formNovoPac,
-                                                                                        destino: e.target.value.toUpperCase(),
-                                                                                    },
-                                                                                }))
-                                                                            }
-                                                                            className="flex-1 min-w-[180px] bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase"
-                                                                        />
-                                                                        <button
-                                                                            type="button"
-                                                                            disabled={salvandoSecao}
-                                                                            onClick={() => handleAdicionarPacienteNaVtr(emp)}
-                                                                            className="bg-qth-blue hover:bg-blue-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded text-xs cursor-pointer"
-                                                                        >
-                                                                            + INCLUIR PACIENTE
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                            )}
-
-                                                            {pacientesVtr.length === 0 ? (
-                                                                <p className="text-[11px] text-slate-400">
-                                                                    Nenhum paciente individualizado cadastrado nesta viatura ainda.
-                                                                </p>
-                                                            ) : (
-                                                                <div className="space-y-2.5">
-                                                                    {pacientesVtr.map((pac, idxPac) => {
-                                                                        const textoEvoPac = novaEvolucaoPorPaciente[pac.id] || ''
-                                                                        return (
-                                                                            <div
-                                                                                key={pac.id}
-                                                                                className="bg-qth-bg/80 border border-slate-700 rounded-lg p-3 space-y-2.5"
-                                                                            >
-                                                                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                                                                    <span className="text-xs font-extrabold text-qth-orange uppercase">
-                                                                                        PACIENTE #{idxPac + 1} • {pac.nome}
-                                                                                    </span>
-
-                                                                                    {podeEditarClinicaPaciente && (
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            onClick={() => handleRemoverPacienteNaVtr(emp, pac.id)}
-                                                                                            className="p-1.5 rounded bg-qth-red/20 hover:bg-qth-red text-red-300 hover:text-white cursor-pointer"
-                                                                                            title="Remover paciente"
-                                                                                        >
-                                                                                            <Trash2 className="w-3.5 h-3.5" />
-                                                                                        </button>
-                                                                                    )}
-                                                                                </div>
-
-                                                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
-                                                                                    <input
-                                                                                        type="text"
-                                                                                        disabled={!podeEditarClinicaPaciente}
-                                                                                        placeholder="NOME / IDENTIFICAÇÃO"
-                                                                                        value={pac.nome}
-                                                                                        onChange={(e) =>
-                                                                                            handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                                                nome: e.target.value.toUpperCase(),
-                                                                                            })
-                                                                                        }
-                                                                                        className="lg:col-span-2 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                                                    />
-                                                                                    <input
-                                                                                        type="text"
-                                                                                        disabled={!podeEditarClinicaPaciente}
-                                                                                        placeholder="IDADE"
-                                                                                        value={pac.idade}
-                                                                                        onChange={(e) =>
-                                                                                            handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                                                idade: e.target.value
-                                                                                                    .replace(/\D/g, '')
-                                                                                                    .slice(0, 3),
-                                                                                            })
-                                                                                        }
-                                                                                        className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white disabled:opacity-60"
-                                                                                    />
-                                                                                    <SelectPesquisavel
-                                                                                        opcoes={CORES_START.map((c) => c.id)}
-                                                                                        valor={pac.cor_start}
-                                                                                        placeholder="COR START..."
-                                                                                        disabled={!podeEditarClinicaPaciente}
-                                                                                        onChange={(val) =>
-                                                                                            handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                                                cor_start: val,
-                                                                                            })
-                                                                                        }
-                                                                                    />
-                                                                                    <input
-                                                                                        type="text"
-                                                                                        disabled={!podeEditarClinicaPaciente}
-                                                                                        placeholder="DESTINO / HOSPITAL"
-                                                                                        value={pac.destino}
-                                                                                        onChange={(e) =>
-                                                                                            handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                                                destino: e.target.value.toUpperCase(),
-                                                                                            })
-                                                                                        }
-                                                                                        className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase disabled:opacity-60"
-                                                                                    />
-                                                                                </div>
-
-                                                                                <textarea
-                                                                                    rows={2}
-                                                                                    disabled={!podeEditarClinicaPaciente}
-                                                                                    placeholder="Quadro clínico individual deste paciente..."
-                                                                                    value={pac.quadro_clinico || ''}
-                                                                                    onChange={(e) =>
-                                                                                        handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                                            quadro_clinico: e.target.value,
-                                                                                        })
-                                                                                    }
-                                                                                    className="w-full bg-qth-card border border-slate-600 rounded p-2 text-xs text-white disabled:opacity-60"
-                                                                                />
-
-                                                                                {podeEditarClinicaPaciente && (
-                                                                                    <div className="flex flex-col sm:flex-row gap-2">
-                                                                                        <input
-                                                                                            type="text"
-                                                                                            placeholder="Nova evolução clínica deste paciente..."
-                                                                                            value={textoEvoPac}
-                                                                                            onChange={(e) =>
-                                                                                                setNovaEvolucaoPorPaciente((prev) => ({
-                                                                                                    ...prev,
-                                                                                                    [pac.id]: e.target.value,
-                                                                                                }))
-                                                                                            }
-                                                                                            className="flex-1 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white"
-                                                                                        />
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            disabled={salvandoSecao}
-                                                                                            onClick={() => handleSalvarPacienteNaVtr(emp, pac.id)}
-                                                                                            className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded text-xs flex items-center justify-center gap-1 cursor-pointer"
-                                                                                        >
-                                                                                            <Save className="w-3.5 h-3.5" />
-                                                                                            SALVAR PACIENTE
-                                                                                        </button>
-                                                                                    </div>
-                                                                                )}
-
-                                                                                {Array.isArray(pac.evolucoes) &&
-                                                                                    pac.evolucoes.length > 0 && (
-                                                                                        <div className="space-y-1 pt-1">
-                                                                                            {pac.evolucoes.map((ev) => (
-                                                                                                <div
-                                                                                                    key={ev.id}
-                                                                                                    className="bg-qth-card/80 border border-slate-700/70 rounded p-2 text-[11px]"
-                                                                                                >
-                                                                                                    <span className="text-[10px] font-bold text-qth-orange">
-                                                                                                        {ev.autor_nome} ({ev.autor_cargo}) •{' '}
-                                                                                                        {ev.criado_em
-                                                                                                            ? new Date(ev.criado_em).toLocaleString(
-                                                                                                                'pt-BR'
-                                                                                                            )
-                                                                                                            : ''}
-                                                                                                    </span>
-                                                                                                    <p className="text-white mt-0.5">{ev.texto}</p>
-                                                                                                </div>
-                                                                                            ))}
-                                                                                        </div>
-                                                                                    )}
-                                                                            </div>
-                                                                        )
-                                                                    })}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    )
-                                                })}
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <BlocoRecursosRegulador
-                                        recursosSolicitados={editRegulador.recursos_solicitados || []}
-                                        onChange={(novaLista) =>
-                                            setEditRegulador({
-                                                ...editRegulador,
-                                                recursos_solicitados: novaLista,
-                                            })
-                                        }
-                                        pacientesDisponiveis={pacientesDisponiveisRegulador}
-                                        disabled={!podeEditarRegulador}
-                                    />
-
-                                    {/* Regulação Geral da Ocorrência */}
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                                        <SelectPesquisavel
-                                            label="Classificação de Risco"
-                                            opcoes={CLASSIFICACOES_RISCO}
-                                            valor={editRegulador.classificacao_risco || ''}
-                                            placeholder="SELECIONE..."
-                                            disabled={!podeEditarRegulador}
-                                            onChange={(val) =>
-                                                setEditRegulador({ ...editRegulador, classificacao_risco: val })
-                                            }
-                                        />
-
-                                        <SelectPesquisavel
-                                            label="Recurso Indicado"
-                                            opcoes={RECURSOS_INDICADOS}
-                                            valor={editRegulador.recurso_indicado || ''}
-                                            placeholder="SELECIONE OU DIGITE..."
-                                            disabled={!podeEditarRegulador}
-                                            permiteTextoLivre={true}
-                                            onChange={(val) =>
-                                                setEditRegulador({ ...editRegulador, recurso_indicado: val })
-                                            }
-                                        />
-
-                                        <div>
-                                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                Hipótese Diagnóstica
-                                            </label>
-                                            <input
-                                                type="text"
-                                                disabled={!podeEditarRegulador}
-                                                value={editRegulador.hipotese_diagnostica || ''}
-                                                onChange={(e) =>
-                                                    setEditRegulador({
-                                                        ...editRegulador,
-                                                        hipotese_diagnostica: e.target.value.toUpperCase(),
-                                                    })
-                                                }
-                                                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                            Quadro Clínico Geral da Ocorrência
-                                        </label>
-                                        <textarea
-                                            rows={3}
-                                            disabled={!podeEditarRegulador}
-                                            value={editRegulador.quadro_clinico || ''}
-                                            onChange={(e) => {
-                                                setEditRegulador({
-                                                    ...editRegulador,
-                                                    quadro_clinico: e.target.value,
-                                                })
-                                                setNovoQuadroClinicoRapido(e.target.value)
-                                            }}
-                                            placeholder="Descreva sinais vitais, estado neurológico, queixas e achados clínicos..."
-                                            className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg p-3 text-xs text-white disabled:opacity-60 focus:outline-none focus:border-qth-orange"
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                            Conduta da Regulação / Destino Hospitalar
-                                        </label>
-                                        <textarea
-                                            rows={2}
-                                            disabled={!podeEditarRegulador}
-                                            value={editRegulador.conduta_regulacao || ''}
-                                            onChange={(e) =>
-                                                setEditRegulador({
-                                                    ...editRegulador,
-                                                    conduta_regulacao: e.target.value,
-                                                })
-                                            }
-                                            className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg p-3 text-xs text-white disabled:opacity-60 focus:outline-none focus:border-qth-orange"
-                                        />
-                                    </div>
-
-                                    {podeEditarRegulador && (
-                                        <div className="flex justify-end">
-                                            <button
-                                                type="button"
-                                                disabled={salvandoSecao}
-                                                onClick={handleSalvarRegulador}
-                                                className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer"
-                                            >
-                                                <Save className="w-3.5 h-3.5" />
-                                                {salvandoSecao ? 'SALVANDO...' : 'SALVAR REGULAÇÃO'}
-                                            </button>
-                                        </div>
-                                    )}
-
-                                    {podeEditarRegulador && (
-                                        <form
-                                            onSubmit={handleAdicionarEvolucao}
-                                            className="bg-qth-bg/70 border border-slate-700 rounded-xl p-3 space-y-2.5"
-                                        >
-                                            <p className="text-xs font-extrabold text-qth-orange uppercase">
-                                                Incluir Evolução Geral da Regulação
-                                            </p>
-                                            <textarea
-                                                rows={2}
-                                                value={novaEvolucaoTexto}
-                                                onChange={(e) => setNovaEvolucaoTexto(e.target.value)}
-                                                placeholder="Digite a evolução clínica geral, intercorrência ou reavaliação..."
-                                                className="w-full bg-qth-card border border-slate-600 rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-qth-orange"
-                                            />
-                                            <div className="flex justify-end">
-                                                <button
-                                                    type="submit"
-                                                    disabled={salvandoSecao}
-                                                    className="bg-qth-orange hover:bg-orange-600 disabled:opacity-50 text-white font-bold px-3.5 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer"
-                                                >
-                                                    <Send className="w-3.5 h-3.5" />
-                                                    ADICIONAR EVOLUÇÃO
-                                                </button>
-                                            </div>
-                                        </form>
-                                    )}
-
-                                    <div className="space-y-2">
-                                        <h4 className="text-xs font-extrabold text-white uppercase">
-                                            Linha do Tempo de Evoluções Gerais ({evolucoesDaOcorrencia.length})
-                                        </h4>
-                                        {evolucoesDaOcorrencia.map((evo) => (
-                                            <div
-                                                key={evo.id}
-                                                className="bg-qth-bg/70 border border-slate-700/80 rounded-xl p-3 space-y-1"
-                                            >
-                                                <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400">
-                                                    <span className="font-bold text-qth-orange uppercase">
-                                                        {evo.autor_nome || 'REGULADOR'} • {evo.autor_cargo || 'MEDICO REGULADOR'}
-                                                    </span>
-                                                    <span>{new Date(evo.criado_em).toLocaleString('pt-BR')}</span>
-                                                </div>
-                                                <p className="text-xs text-white whitespace-pre-line">
-                                                    {evo.evolucao_texto}
-                                                </p>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* ABA 4: RÁDIO OPERADOR (Horários individuais por VTR + Mini Painel Lateral de Recursos) */}
-                            {abaInterna === 'RADIO_OPERADOR' && (
-                                <div className="space-y-4">
-                                    {!podeEditarRadio && (
-                                        <div className="bg-yellow-500/10 border border-yellow-500/40 text-yellow-200 text-xs p-2.5 rounded-lg flex items-center gap-2">
-                                            <Lock className="w-4 h-4 shrink-0" />
-                                            <span>
-                                                Apenas Rádio Operadores, Médicos Reguladores, Coordenadores e Gestores podem empenhar viaturas e lançar códigos J / QTA.
-                                            </span>
-                                        </div>
-                                    )}
-
-                                    {renderPainelBalancoVitimas(ocorrenciaSelecionada, empenhosDaOcorrencia, {
-                                        permitirEditarVtr: podeEditarRadio,
-                                    })}
-
-                                    {normalizarRecursosSolicitados(ocorrenciaSelecionada.recursos_solicitados)
-                                        .length > 0 && (
-                                            <div className="bg-qth-bg/75 border border-sky-500/40 rounded-xl p-3 space-y-2">
-                                                <p className="text-[11px] font-extrabold text-sky-300 uppercase">
-                                                    Solicitações da Regulação para Despacho
-                                                </p>
-                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                                                    {normalizarRecursosSolicitados(
-                                                        ocorrenciaSelecionada.recursos_solicitados
-                                                    ).map((reqItem, idxReq) => (
-                                                        <div
-                                                            key={reqItem.id || idxReq}
-                                                            className="bg-qth-card border border-slate-700 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-2"
-                                                        >
-                                                            <div className="space-y-0.5">
-                                                                <p className="text-xs font-extrabold text-white uppercase">
-                                                                    {reqItem.quantidade}x {reqItem.recurso || 'RECURSO'}
-                                                                </p>
-                                                                {reqItem.paciente_nome && (
-                                                                    <p className="text-[10px] font-bold text-sky-300 uppercase">
-                                                                        PACIENTE: {reqItem.paciente_info || reqItem.paciente_nome}
-                                                                    </p>
-                                                                )}
-                                                                {reqItem.observacao && (
-                                                                    <p className="text-[10px] text-slate-300 uppercase">
-                                                                        IDENTIFICAÇÃO / OBS: {reqItem.observacao}
-                                                                    </p>
-                                                                )}
-                                                            </div>
-
-                                                            {podeEditarRadio && (
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        setViaturaParaEmpenhar((reqItem.recurso || '').toUpperCase())
-                                                                        const infoDirecionamento = [
-                                                                            `RECURSO SOLICITADO: ${reqItem.quantidade}x ${reqItem.recurso || 'RECURSO'}`,
-                                                                            reqItem.paciente_nome
-                                                                                ? `PACIENTE: ${reqItem.paciente_info || reqItem.paciente_nome}`
-                                                                                : '',
-                                                                            reqItem.observacao
-                                                                                ? `OBS/IDENTIFICAÇÃO: ${reqItem.observacao}`
-                                                                                : '',
-                                                                        ]
-                                                                            .filter(Boolean)
-                                                                            .join(' • ')
-
-                                                                        setEditRadio((prev) =>
-                                                                            prev
-                                                                                ? {
-                                                                                      ...prev,
-                                                                                      observacao_radio: prev.observacao_radio
-                                                                                          ? `${prev.observacao_radio}\n${infoDirecionamento}`
-                                                                                          : infoDirecionamento,
-                                                                                  }
-                                                                                : prev
-                                                                        )
-                                                                        setMensagemModal(
-                                                                            `Direcionamento (${reqItem.quantidade}x ${reqItem.recurso}) preparado para empenho.`
-                                                                        )
-                                                                    }}
-                                                                    className="bg-qth-orange hover:bg-orange-600 text-white font-bold px-2.5 py-1.5 rounded-lg text-[10px] uppercase cursor-pointer"
-                                                                >
-                                                                    PREPARAR EMPENHO
-                                                                </button>
-                                                            )}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-
-                                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-                                        {/* Coluna Esquerda: Empenho Multi-VTR, Horários Individuais, J, QTA */}
-                                        <div className="lg:col-span-8 space-y-4">
-                                            <div className="bg-qth-bg/70 border border-slate-700 rounded-xl p-3.5 space-y-3">
-                                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                                    <h4 className="text-xs font-extrabold text-qth-orange uppercase flex items-center gap-1.5">
-                                                        <Truck className="w-4 h-4" />
-                                                        Empenho Multi-VTR ({empenhosDaOcorrencia.length} vinculada(s))
-                                                    </h4>
-
-                                                    {podeEditarRadio && (
-                                                        <div className="flex items-center gap-2">
-                                                            <div className="w-48">
-                                                                <SelectPesquisavel
-                                                                    opcoes={viaturas.map((v) => v.prefixo.toUpperCase())}
-                                                                    valor={viaturaParaEmpenhar}
-                                                                    permiteTextoLivre={true}
-                                                                    onChange={setViaturaParaEmpenhar}
-                                                                    placeholder="SELECIONAR OU DIGITAR..."
-                                                                />
-                                                            </div>
-                                                            <button
-                                                                type="button"
-                                                                disabled={salvandoSecao || !viaturaParaEmpenhar}
-                                                                onClick={handleEmpenharViatura}
-                                                                className="bg-qth-orange hover:bg-orange-600 disabled:opacity-50 text-white font-bold px-3 py-2 rounded-lg text-xs cursor-pointer"
-                                                            >
-                                                                EMPENHAR VTR
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                                {empenhosDaOcorrencia.length === 0 ? (
-                                                    <p className="text-xs text-slate-400">
-                                                        Nenhuma viatura empenhada nesta ocorrência.
-                                                    </p>
-                                                ) : (
-                                                    <div className="space-y-3">
-                                                        {empenhosDaOcorrencia.map((emp) => {
-                                                            const coresEmp = normalizarCoresVtr(emp.vitimas_cores)
-                                                            const draftVtr = obterDraftVtr(emp)
-                                                            return (
-                                                                <div
-                                                                    key={emp.id}
-                                                                    className="bg-qth-card border border-slate-700 rounded-xl p-3 space-y-3"
-                                                                >
-                                                                    <div className="flex flex-wrap items-center justify-between gap-3">
-                                                                        <div>
-                                                                            <p className="text-xs font-extrabold text-white uppercase">
-                                                                                {emp.prefixo}
-                                                                            </p>
-                                                                            <p className="text-[10px] text-slate-400 uppercase">
-                                                                                ACION: {draftVtr.h_acionamento || '--:--'} • SAÍDA:{' '}
-                                                                                {draftVtr.h_saida_base || '--:--'} • QTH:{' '}
-                                                                                {draftVtr.h_chegada_qth || '--:--'} • SAÚDE:{' '}
-                                                                                {draftVtr.h_chegada_saude || '--:--'}
-                                                                            </p>
-                                                                        </div>
-
-                                                                        <div className="flex items-center gap-2">
-                                                                            <div className="w-52">
-                                                                                <SelectPesquisavel
-                                                                                    opcoes={STATUS_EMPENHO_VTR}
-                                                                                    valor={draftVtr.status_empenho}
-                                                                                    disabled={!podeEditarRadio}
-                                                                                    onChange={(novoSt) =>
-                                                                                        handleAtualizarStatusEmpenho(emp, novoSt)
-                                                                                    }
-                                                                                />
-                                                                            </div>
-
-                                                                            {podeEditarRadio && (
-                                                                                <button
-                                                                                    type="button"
-                                                                                    onClick={() => handleDesvincularEmpenho(emp)}
-                                                                                    className="p-2 rounded-lg bg-qth-red/20 hover:bg-qth-red text-red-300 hover:text-white cursor-pointer"
-                                                                                    title="Remover viatura do empenho"
-                                                                                >
-                                                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                                                </button>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-
-                                                                    <div className="bg-qth-bg/75 border border-slate-700/70 rounded-lg p-2.5 space-y-2">
-                                                                        <p className="text-[10px] font-bold text-qth-orange uppercase flex items-center gap-1">
-                                                                            <Clock className="w-3 h-3" />
-                                                                            Registro de Horários Individual ({emp.prefixo})
-                                                                        </p>
-                                                                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                                                            {[
-                                                                                { key: 'h_acionamento', label: 'Acionamento' },
-                                                                                { key: 'h_saida_base', label: 'Saída Base' },
-                                                                                { key: 'h_chegada_qth', label: 'Chegada QTH' },
-                                                                                { key: 'h_saida_qth', label: 'Saída QTH' },
-                                                                                { key: 'h_chegada_saude', label: 'Cheg. Saúde' },
-                                                                                { key: 'h_saida_saude', label: 'Saída Saúde' },
-                                                                                { key: 'h_encerramento', label: 'Encerramento' },
-                                                                            ].map((h) => (
-                                                                                <div key={h.key}>
-                                                                                    <label className="block text-[9px] font-bold text-slate-300 mb-1 uppercase">
-                                                                                        {h.label}
-                                                                                    </label>
-                                                                                    <div className="flex items-center gap-1">
-                                                                                        <input
-                                                                                            type="text"
-                                                                                            disabled={!podeEditarRadio}
-                                                                                            value={draftVtr[h.key] || ''}
-                                                                                            onChange={(e) =>
-                                                                                                alterarHorarioEStatusVtr(
-                                                                                                    emp,
-                                                                                                    h.key,
-                                                                                                    e.target.value
-                                                                                                )
-                                                                                            }
-                                                                                            placeholder="HH:MM"
-                                                                                            className="w-full bg-qth-card border border-slate-600 rounded px-1.5 py-1 text-xs font-semibold text-white disabled:opacity-60"
-                                                                                        />
-                                                                                        {podeEditarRadio && (
-                                                                                            <button
-                                                                                                type="button"
-                                                                                                onClick={() =>
-                                                                                                    alterarHorarioEStatusVtr(
-                                                                                                        emp,
-                                                                                                        h.key,
-                                                                                                        horaAtualHhMm()
-                                                                                                    )
-                                                                                                }
-                                                                                                className="px-1.5 py-1 rounded bg-qth-green hover:bg-green-700 text-[9px] font-extrabold text-white cursor-pointer"
-                                                                                                title="Registrar hora atual"
-                                                                                            >
-                                                                                                AGORA
-                                                                                            </button>
-                                                                                        )}
-                                                                                    </div>
-                                                                                </div>
-                                                                            ))}
-                                                                        </div>
-
-                                                                        {podeEditarRadio && (
-                                                                            <div className="flex justify-end pt-1">
-                                                                                <button
-                                                                                    type="button"
-                                                                                    disabled={salvandoSecao}
-                                                                                    onClick={() => handleSalvarHorariosVtr(emp)}
-                                                                                    className="bg-qth-blue hover:bg-blue-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded text-[11px] flex items-center gap-1 cursor-pointer"
-                                                                                >
-                                                                                    <Save className="w-3 h-3" />
-                                                                                    SALVAR HORÁRIOS {emp.prefixo}
-                                                                                </button>
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-
-                                                                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-700/60">
-                                                                        <span className="text-[10px] font-bold text-slate-300 uppercase mr-1">
-                                                                            Vítimas na VTR:
-                                                                        </span>
-                                                                        {CORES_START.map((cor) => (
-                                                                            <div
-                                                                                key={cor.id}
-                                                                                className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-extrabold ${cor.chip}`}
-                                                                            >
-                                                                                <span>{cor.label}:</span>
-                                                                                <span>{coresEmp[cor.id] || 0}</span>
-                                                                                {podeEditarRadio && (
-                                                                                    <>
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            disabled={
-                                                                                                salvandoSecao || (coresEmp[cor.id] || 0) <= 0
-                                                                                            }
-                                                                                            onClick={() => handleAlterarCorVtr(emp, cor.id, -1)}
-                                                                                            className="ml-1 px-1.5 py-0.5 rounded bg-black/40 hover:bg-black/70 disabled:opacity-30 cursor-pointer"
-                                                                                        >
-                                                                                            -
-                                                                                        </button>
-                                                                                        <button
-                                                                                            type="button"
-                                                                                            disabled={salvandoSecao}
-                                                                                            onClick={() => handleAlterarCorVtr(emp, cor.id, 1)}
-                                                                                            className="px-1.5 py-0.5 rounded bg-black/40 hover:bg-black/70 disabled:opacity-30 cursor-pointer"
-                                                                                        >
-                                                                                            +
-                                                                                        </button>
-                                                                                    </>
-                                                                                )}
-                                                                            </div>
-                                                                        ))}
-                                                                    </div>
-                                                                </div>
-                                                            )
-                                                        })}
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                                                <SelectPesquisavel
-                                                    label="Status da Ocorrência"
-                                                    opcoes={STATUS_OCORRENCIA_OPCOES}
-                                                    valor={editRadio.status_ocorrencia || 'PENDENTE'}
-                                                    disabled={!podeEditarRadio}
-                                                    onChange={(val) =>
-                                                        setEditRadio({ ...editRadio, status_ocorrencia: val })
-                                                    }
-                                                />
-
-                                                <SelectPesquisavel
-                                                    label="Código J"
-                                                    opcoes={CODIGOS_J}
-                                                    valor={editRadio.codigo_j || ''}
-                                                    disabled={!podeEditarRadio}
-                                                    permiteTextoLivre={true}
-                                                    placeholder="SELECIONE OU DIGITE CÓDIGO J"
-                                                    onChange={(val) => setEditRadio({ ...editRadio, codigo_j: val })}
-                                                />
-
-                                                <SelectPesquisavel
-                                                    label="Código QTA"
-                                                    opcoes={CODIGOS_QTA}
-                                                    valor={editRadio.codigo_qta || ''}
-                                                    disabled={!podeEditarRadio}
-                                                    permiteTextoLivre={true}
-                                                    placeholder="SELECIONE OU DIGITE QTA"
-                                                    onChange={(val) => setEditRadio({ ...editRadio, codigo_qta: val })}
-                                                />
-                                            </div>
-
-                                            <div>
-                                                <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-                                                    Observações do Rádio Operador
-                                                </label>
-                                                <textarea
-                                                    rows={2}
-                                                    disabled={!podeEditarRadio}
-                                                    value={editRadio.observacao_radio || ''}
-                                                    onChange={(e) =>
-                                                        setEditRadio({
-                                                            ...editRadio,
-                                                            observacao_radio: e.target.value,
-                                                        })
-                                                    }
-                                                    className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg p-3 text-xs text-white disabled:opacity-60 focus:outline-none focus:border-qth-orange"
-                                                />
-                                            </div>
-
-                                            {podeEditarRadio && (
-                                                <div className="flex flex-wrap items-center justify-end gap-2">
-                                                    <button
-                                                        type="button"
-                                                        disabled={salvandoSecao}
-                                                        onClick={() => handleSalvarRadio('CANCELADA')}
-                                                        className="bg-qth-red/25 hover:bg-qth-red text-red-200 hover:text-white font-bold px-3.5 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer"
-                                                    >
-                                                        <AlertTriangle className="w-3.5 h-3.5" />
-                                                        CANCELAR / QTA
-                                                    </button>
-
-                                                    <button
-                                                        type="button"
-                                                        disabled={salvandoSecao}
-                                                        onClick={() => handleSalvarRadio('FINALIZADA')}
-                                                        className="bg-qth-blue hover:bg-blue-700 disabled:opacity-50 text-white font-bold px-3.5 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer"
-                                                    >
-                                                        <CheckCircle2 className="w-3.5 h-3.5" />
-                                                        FINALIZAR OCORRÊNCIA
-                                                    </button>
-
-                                                    <button
-                                                        type="button"
-                                                        disabled={salvandoSecao}
-                                                        onClick={() => handleSalvarRadio(null)}
-                                                        className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-4 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer"
-                                                    >
-                                                        <Save className="w-3.5 h-3.5" />
-                                                        {salvandoSecao ? 'SALVANDO...' : 'SALVAR RÁDIO'}
-                                                    </button>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        {/* Coluna Direita: Mini Painel de Recursos (1 linha por recurso, ordem decrescente) */}
-                                        <div className="lg:col-span-4 bg-qth-bg/75 border border-slate-700 rounded-xl p-3 space-y-2.5">
-                                            <div className="flex items-center justify-between border-b border-slate-700/70 pb-2">
-                                                <span className="text-xs font-extrabold text-qth-orange uppercase flex items-center gap-1.5">
-                                                    <Layers className="w-3.5 h-3.5" />
-                                                    Recursos ({recursosOrdenadosMiniPainel.length})
-                                                </span>
-                                                <span className="text-[9px] font-bold text-slate-400 uppercase">
-                                                    DISP › EMP › BAIX
-                                                </span>
-                                            </div>
-
-                                            <p className="text-[10px] text-slate-400">
-                                                Clique no recurso para selecionar e clicar em <strong>EMPENHAR VTR</strong>.
-                                            </p>
-
-                                            <div className="space-y-1.5 max-h-[460px] overflow-y-auto pr-0.5">
-                                                {recursosOrdenadosMiniPainel.map((rec) => {
-                                                    const selecionado =
-                                                        viaturaParaEmpenhar.toUpperCase() === rec.prefixoUpper
-                                                    return (
-                                                        <button
-                                                            key={rec.id}
-                                                            type="button"
-                                                            onClick={() => {
-                                                                if (podeEditarRadio) {
-                                                                    setViaturaParaEmpenhar(rec.prefixoUpper)
-                                                                }
-                                                            }}
-                                                            className={`w-full px-2.5 py-1.5 rounded-lg border text-left flex items-center justify-between gap-2 text-[11px] font-extrabold uppercase transition-all cursor-pointer ${rec.meta.rowClass
-                                                                } ${selecionado
-                                                                    ? 'ring-2 ring-qth-orange border-qth-orange'
-                                                                    : 'hover:brightness-110'
-                                                                }`}
-                                                        >
-                                                            <span className="truncate">{rec.prefixoUpper}</span>
-                                                            <span
-                                                                className={`text-[9px] px-1.5 py-0.5 rounded border shrink-0 ${rec.meta.pillClass}`}
-                                                            >
-                                                                {rec.statusUpper}
-                                                            </span>
-                                                        </button>
-                                                    )
-                                                })}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
+            <ModalOcorrencia
+                ocorrenciaSelecionada={ocorrenciaSelecionada}
+                editTarm={editTarm}
+                setEditTarm={setEditTarm}
+                editRegulador={editRegulador}
+                setEditRegulador={setEditRegulador}
+                editRadio={editRadio}
+                setEditRadio={setEditRadio}
+                abaInterna={abaInterna}
+                setAbaInterna={setAbaInterna}
+                mensagemModal={mensagemModal}
+                setMensagemModal={setMensagemModal}
+                fecharModalOcorrencia={fecharModalOcorrencia}
+                podeCriarOuEditarTarm={podeCriarOuEditarTarm}
+                podeEditarClinicaPaciente={podeEditarClinicaPaciente}
+                podeEditarRegulador={podeEditarRegulador}
+                podeEditarRadio={podeEditarRadio}
+                salvandoSecao={salvandoSecao}
+                listaEstados={listaEstados}
+                cidadesEditTarmUrb={cidadesEditTarmUrb}
+                cidadesEditTarmRod={cidadesEditTarmRod}
+                cidadesEditTarmOrig={cidadesEditTarmOrig}
+                cidadesEditTarmDest={cidadesEditTarmDest}
+                empenhosDaOcorrencia={empenhosDaOcorrencia}
+                evolucoesDaOcorrencia={evolucoesDaOcorrencia}
+                viaturas={viaturas}
+                rascunhosVtr={rascunhosVtr}
+                novoPacientePorVtr={novoPacientePorVtr}
+                setNovoPacientePorVtr={setNovoPacientePorVtr}
+                novaEvolucaoPorPaciente={novaEvolucaoPorPaciente}
+                setNovaEvolucaoPorPaciente={setNovaEvolucaoPorPaciente}
+                novoPacienteCena={novoPacienteCena}
+                setNovoPacienteCena={setNovoPacienteCena}
+                handleAdicionarPacienteCena={handleAdicionarPacienteCena}
+                handleAtualizarPacienteCenaLocal={handleAtualizarPacienteCenaLocal}
+                handleRemoverPacienteCena={handleRemoverPacienteCena}
+                handleEnviarRecursosImediato={handleEnviarRecursosImediato}
+                handleAlternarApoioImediato={handleAlternarApoioImediato}
+                handleAlterarPrioridadeImediata={handleAlterarPrioridadeImediata}
+                novaEvolucaoTexto={novaEvolucaoTexto}
+                setNovaEvolucaoTexto={setNovaEvolucaoTexto}
+                setNovoQuadroClinicoRapido={setNovoQuadroClinicoRapido}
+                viaturaParaEmpenhar={viaturaParaEmpenhar}
+                setViaturaParaEmpenhar={setViaturaParaEmpenhar}
+                pacientesDisponiveisRegulador={pacientesDisponiveisRegulador}
+                recursosOrdenadosMiniPainel={recursosOrdenadosMiniPainel}
+                normalizarRecursosSolicitados={normalizarRecursosSolicitados}
+                renderPainelBalancoVitimas={renderPainelBalancoVitimas}
+                obterDraftVtr={obterDraftVtr}
+                handleSalvarTarm={handleSalvarTarm}
+                handleAdicionarPacienteNaVtr={handleAdicionarPacienteNaVtr}
+                handleAtualizarCampoPacienteLocal={handleAtualizarCampoPacienteLocal}
+                handleSalvarPacienteNaVtr={handleSalvarPacienteNaVtr}
+                handleRemoverPacienteNaVtr={handleRemoverPacienteNaVtr}
+                handleSalvarRegulador={handleSalvarRegulador}
+                handleAdicionarEvolucao={handleAdicionarEvolucao}
+                handleEmpenharViatura={handleEmpenharViatura}
+                handleAtualizarStatusEmpenho={handleAtualizarStatusEmpenho}
+                handleDesvincularEmpenho={handleDesvincularEmpenho}
+                alterarHorarioEStatusVtr={alterarHorarioEStatusVtr}
+                horaAtualHhMm={horaAtualHhMm}
+                handleSalvarHorariosVtr={handleSalvarHorariosVtr}
+                handleAlterarCorVtr={handleAlterarCorVtr}
+                handleSalvarRadio={handleSalvarRadio}
+                handleRemoverSolicitacaoDespacho={handleRemoverSolicitacaoDespacho}
+            />
         </div>
     )
 }

@@ -6,6 +6,7 @@ import { RECURSOS_INDICADOS } from '../utils/painelCentralHelpers'
 export default function BlocoRecursosRegulador({
     recursosSolicitados = [],
     onChange,
+    onEnviarImediato,
     pacientesDisponiveis = [],
     disabled = false,
 }) {
@@ -23,6 +24,21 @@ export default function BlocoRecursosRegulador({
         })),
     ]
 
+    function montarInfoPaciente(pacObj) {
+        if (!pacObj) return null
+        return {
+            nome: pacObj.nome || '',
+            idade: pacObj.idade || '',
+            tipo_idade: pacObj.tipo_idade || '',
+            sexo: pacObj.sexo || '',
+            cor_start: pacObj.cor_start || '',
+            destino: pacObj.destino || '',
+            hipotese_diagnostica: pacObj.hipotese_diagnostica || '',
+            quadro_clinico: pacObj.detalhamento || pacObj.quadro_clinico || '',
+            vtr_origem: pacObj.vtrPrefixo || '',
+        }
+    }
+
     function adicionarSolicitacao() {
         if (disabled) return
         const recursoLimpo = (novoRecurso || '').trim().toUpperCase()
@@ -30,30 +46,44 @@ export default function BlocoRecursosRegulador({
 
         const qtdLimpa = Math.max(1, parseInt(novaQuantidade, 10) || 1)
         const pacObj = pacientesDisponiveis.find((p) => p.id === novoPacienteId) || null
+        const pacIdLimpo = pacObj ? pacObj.id : ''
 
-        const novoItem = {
-            id: `req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            recurso: recursoLimpo,
-            quantidade: qtdLimpa,
-            paciente_id: pacObj ? pacObj.id : '',
-            paciente_nome: pacObj ? pacObj.nome : '',
-            paciente_info: pacObj
-                ? {
-                    nome: pacObj.nome || '',
-                    idade: pacObj.idade || '',
-                    tipo_idade: pacObj.tipo_idade || '',
-                    sexo: pacObj.sexo || '',
-                    cor_start: pacObj.cor_start || '',
-                    destino: pacObj.destino || '',
-                    quadro_clinico: pacObj.quadro_clinico || '',
-                    vtr_origem: pacObj.vtrPrefixo || '',
-                }
-                : null,
-            atendido: false,
-            viaturas_vinculadas: [],
+        const idxExistente = lista.findIndex(
+            (item) =>
+                !item.atendido &&
+                (item.recurso || '').toUpperCase() === recursoLimpo &&
+                (item.paciente_id || '') === pacIdLimpo
+        )
+
+        let proximaLista
+        if (idxExistente >= 0) {
+            proximaLista = lista.map((item, idx) =>
+                idx === idxExistente
+                    ? {
+                        ...item,
+                        quantidade: (parseInt(item.quantidade, 10) || 1) + qtdLimpa,
+                        paciente_id: pacIdLimpo,
+                        paciente_nome: pacObj ? pacObj.nome : '',
+                        paciente_info: montarInfoPaciente(pacObj),
+                    }
+                    : item
+            )
+        } else {
+            const novoItem = {
+                id: `req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                recurso: recursoLimpo,
+                quantidade: qtdLimpa,
+                paciente_id: pacIdLimpo,
+                paciente_nome: pacObj ? pacObj.nome : '',
+                paciente_info: montarInfoPaciente(pacObj),
+                atendido: false,
+                viaturas_vinculadas: [],
+            }
+            proximaLista = [...lista, novoItem]
         }
 
-        onChange([...lista, novoItem])
+        onChange(proximaLista)
+        onEnviarImediato?.(proximaLista, `Solicitação (${qtdLimpa}x ${recursoLimpo}) enviada ao Rádio Operador.`)
         setNovoRecurso('')
         setNovaQuantidade(1)
         setNovoPacienteId('')
@@ -61,35 +91,26 @@ export default function BlocoRecursosRegulador({
 
     function atualizarItem(id, patch) {
         if (disabled) return
-        onChange(
-            lista.map((item) => {
-                if (item.id !== id) return item
-                const proximo = { ...item, ...(typeof patch === 'function' ? patch(item) : patch) }
-                if ('paciente_id' in (typeof patch === 'function' ? patch(item) : patch)) {
-                    const pacObj =
-                        pacientesDisponiveis.find((p) => p.id === proximo.paciente_id) || null
-                    proximo.paciente_nome = pacObj ? pacObj.nome : ''
-                    proximo.paciente_info = pacObj
-                        ? {
-                            nome: pacObj.nome || '',
-                            idade: pacObj.idade || '',
-                            tipo_idade: pacObj.tipo_idade || '',
-                            sexo: pacObj.sexo || '',
-                            cor_start: pacObj.cor_start || '',
-                            destino: pacObj.destino || '',
-                            quadro_clinico: pacObj.quadro_clinico || '',
-                            vtr_origem: pacObj.vtrPrefixo || '',
-                        }
-                        : null
-                }
-                return proximo
-            })
-        )
+        const proximaLista = lista.map((item) => {
+            if (item.id !== id) return item
+            const proximo = { ...item, ...(typeof patch === 'function' ? patch(item) : patch) }
+            if ('paciente_id' in (typeof patch === 'function' ? patch(item) : patch)) {
+                const pacObj =
+                    pacientesDisponiveis.find((p) => p.id === proximo.paciente_id) || null
+                proximo.paciente_nome = pacObj ? pacObj.nome : ''
+                proximo.paciente_info = montarInfoPaciente(pacObj)
+            }
+            return proximo
+        })
+        onChange(proximaLista)
+        onEnviarImediato?.(proximaLista, 'Vínculo de paciente na solicitação atualizado em tempo real.')
     }
 
     function removerItem(id) {
         if (disabled) return
-        onChange(lista.filter((item) => item.id !== id))
+        const proximaLista = lista.filter((item) => item.id !== id)
+        onChange(proximaLista)
+        onEnviarImediato?.(proximaLista, 'Solicitação de recurso removida.')
     }
 
     return (
@@ -101,7 +122,7 @@ export default function BlocoRecursosRegulador({
                         Solicitação de Recursos para Despacho (Regulador → Rádio Operador)
                     </h4>
                     <p className="text-[10px] text-slate-400 mt-0.5">
-                        Defina quais e quantos recursos destinar e, se desejar, vincule a um paciente específico para identificação na chegada.
+                        Defina quais e quantos recursos destinar e, se desejar, vincule ou altere o paciente associado a qualquer momento.
                     </p>
                 </div>
                 <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600 uppercase">

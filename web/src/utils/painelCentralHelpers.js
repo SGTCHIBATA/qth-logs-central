@@ -227,15 +227,18 @@ export function normalizarPacientesVtr(raw) {
   }
   if (!Array.isArray(lista)) return []
   return lista.map((p, idx) => ({
-    id: p.id || `pac-${idx}-${Date.now()}`,
-    nome: p.nome || `PACIENTE ${idx + 1}`,
-    idade: p.idade || '',
-    tipo_idade: p.tipo_idade || '',
-    sexo: p.sexo || '',
-    cor_start: p.cor_start || '',
-    destino: p.destino || '',
-    quadro_clinico: p.quadro_clinico || '',
-    evolucoes: Array.isArray(p.evolucoes) ? p.evolucoes : [],
+    id: p?.id || `pac-${idx}-${Date.now()}`,
+    nome: p?.nome || `PACIENTE ${idx + 1}`,
+    idade: p?.idade || '',
+    tipo_idade: p?.tipo_idade || '',
+    sexo: p?.sexo || '',
+    cor_start: p?.cor_start || '',
+    destino: p?.destino || '',
+    hipotese_diagnostica: p?.hipotese_diagnostica || '',
+    recurso_indicado: p?.recurso_indicado || '',
+    detalhamento: p?.detalhamento ?? p?.quadro_clinico ?? '',
+    quadro_clinico: p?.quadro_clinico ?? p?.detalhamento ?? '',
+    evolucoes: Array.isArray(p?.evolucoes) ? p.evolucoes : [],
   }))
 }
 
@@ -523,6 +526,7 @@ export function calcularBalancoVitimas(oc, empenhosDaOc) {
   let embarcadasVtr = 0
 
   for (const emp of empenhosDaOc || []) {
+    if ((emp.status_empenho || '').toUpperCase() === 'QTA') continue
     const c = normalizarCoresVtr(emp.vitimas_cores)
     totaisCor.VERMELHO += c.VERMELHO
     totaisCor.AMARELO += c.AMARELO
