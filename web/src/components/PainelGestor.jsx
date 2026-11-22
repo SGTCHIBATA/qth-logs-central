@@ -13,6 +13,8 @@ import {
   ChevronUp,
   X,
   Lock,
+  Search,
+  RotateCcw,
 } from 'lucide-react'
 
 const TODOS_CARGOS = [
@@ -65,6 +67,15 @@ export default function PainelGestor({ perfilLogado }) {
   const [erroNovo, setErroNovo] = useState('')
   const [sucessoNovo, setSucessoNovo] = useState('')
 
+  // Pesquisa global e filtros da aba GESTOR
+  const [buscaTexto, setBuscaTexto] = useState('')
+  const [filtroCargo, setFiltroCargo] = useState('TODOS')
+  const [filtroBase, setFiltroBase] = useState('TODAS')
+  const [filtroMunicipio, setFiltroMunicipio] = useState('TODOS')
+  const [filtroFuncao, setFiltroFuncao] = useState('TODAS')
+  const [filtroViatura, setFiltroViatura] = useState('TODAS')
+  const [filtroStatusConta, setFiltroStatusConta] = useState('TODOS')
+
   const [expandidoId, setExpandidoId] = useState(null)
   const [formEdit, setFormEdit] = useState({})
   const [salvandoEdicao, setSalvandoEdicao] = useState(false)
@@ -84,6 +95,14 @@ export default function PainelGestor({ perfilLogado }) {
     [viaturas]
   )
 
+  const mapaPrefixoPorId = useMemo(() => {
+    const map = new Map()
+    for (const v of viaturas) {
+      map.set(v.id, (v.prefixo || '').toUpperCase())
+    }
+    return map
+  }, [viaturas])
+
   const opcoesBases = useMemo(() => {
     const setBases = new Set()
     for (const p of perfis) {
@@ -92,6 +111,25 @@ export default function PainelGestor({ perfilLogado }) {
     }
     return Array.from(setBases).sort()
   }, [perfis])
+
+  const opcoesMunicipiosFiltro = useMemo(() => {
+    const setMun = new Set()
+    for (const p of perfis) {
+      const m = (p.municipio_lotacao || '').trim().toUpperCase()
+      if (m) setMun.add(m)
+    }
+    return ['TODOS', ...Array.from(setMun).sort()]
+  }, [perfis])
+
+  const opcoesFuncoesFiltro = useMemo(
+    () => ['TODAS', ...FUNCOES_VTR, 'SEM FUNÇÃO'],
+    []
+  )
+
+  const opcoesViaturasFiltro = useMemo(
+    () => ['TODAS', ...opcoesViaturas, 'SEM VIATURA'],
+    [opcoesViaturas]
+  )
 
   const prefixoVtrNovo = useMemo(() => {
     const v = viaturas.find((i) => i.id === formNovo.viatura_atual_id)
@@ -117,6 +155,93 @@ export default function PainelGestor({ perfilLogado }) {
     if (dataVtrs) setViaturas(dataVtrs)
     setCarregando(false)
   }
+
+  const temFiltroAtivo =
+    buscaTexto.trim() !== '' ||
+    filtroCargo !== 'TODOS' ||
+    filtroBase !== 'TODAS' ||
+    filtroMunicipio !== 'TODOS' ||
+    filtroFuncao !== 'TODAS' ||
+    filtroViatura !== 'TODAS' ||
+    filtroStatusConta !== 'TODOS'
+
+  function limparFiltros() {
+    setBuscaTexto('')
+    setFiltroCargo('TODOS')
+    setFiltroBase('TODAS')
+    setFiltroMunicipio('TODOS')
+    setFiltroFuncao('TODAS')
+    setFiltroViatura('TODAS')
+    setFiltroStatusConta('TODOS')
+  }
+
+  const perfisFiltrados = useMemo(() => {
+    const termo = buscaTexto.trim().toUpperCase()
+    const termoDigitos = termo.replace(/\D/g, '')
+
+    return perfis.filter((u) => {
+      const nome = (u.nome_completo || '').toUpperCase()
+      const matricula = (u.matricula || '').toUpperCase()
+      const cpf = (u.cpf || '').replace(/\D/g, '')
+      const email = (u.email || '').toUpperCase()
+      const base = (u.base || '').toUpperCase()
+      const municipio = (u.municipio_lotacao || '').toUpperCase()
+      const cargo = (u.cargo || '').toUpperCase()
+      const funcao = (u.funcao_vtr || '').toUpperCase()
+      const prefixoVtr = u.viatura_atual_id
+        ? mapaPrefixoPorId.get(u.viatura_atual_id) || ''
+        : ''
+      const statusConta = u.ativo === false ? 'INATIVO' : 'ATIVO'
+
+      if (termo) {
+        const matchTexto =
+          nome.includes(termo) ||
+          matricula.includes(termo) ||
+          email.includes(termo) ||
+          base.includes(termo) ||
+          municipio.includes(termo) ||
+          prefixoVtr.includes(termo)
+        const matchCpf = termoDigitos.length > 0 && cpf.includes(termoDigitos)
+        if (!matchTexto && !matchCpf) return false
+      }
+
+      if (filtroCargo !== 'TODOS' && cargo !== filtroCargo) return false
+      if (filtroBase !== 'TODAS' && base !== filtroBase) return false
+      if (filtroMunicipio !== 'TODOS' && municipio !== filtroMunicipio) return false
+
+      if (filtroFuncao !== 'TODAS') {
+        if (filtroFuncao === 'SEM FUNÇÃO') {
+          if (funcao) return false
+        } else if (funcao !== filtroFuncao) {
+          return false
+        }
+      }
+
+      if (filtroViatura !== 'TODAS') {
+        if (filtroViatura === 'SEM VIATURA') {
+          if (prefixoVtr) return false
+        } else if (prefixoVtr !== filtroViatura) {
+          return false
+        }
+      }
+
+      if (filtroStatusConta !== 'TODOS' && statusConta !== filtroStatusConta) {
+        return false
+      }
+
+      return true
+    })
+  }, [
+    perfis,
+    buscaTexto,
+    filtroCargo,
+    filtroBase,
+    filtroMunicipio,
+    filtroFuncao,
+    filtroViatura,
+    filtroStatusConta,
+    mapaPrefixoPorId,
+  ])
 
   function alternarCard(u) {
     if (expandidoId === u.id) {
@@ -449,21 +574,127 @@ export default function PainelGestor({ perfilLogado }) {
           </form>
         )}
 
+        {/* Pesquisa Global e Filtros da Aba GESTOR */}
+        <div className="bg-qth-bg/70 border border-slate-700/80 rounded-xl p-3.5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="relative flex-1 min-w-[220px]">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={buscaTexto}
+                onChange={(e) => setBuscaTexto(e.target.value.toUpperCase())}
+                placeholder="PESQUISAR POR NOME, MATRÍCULA, CPF, E-MAIL, BASE OU MUNICÍPIO..."
+                className="w-full bg-qth-card border border-slate-600 rounded-lg pl-9 pr-8 py-2 text-xs font-semibold text-white placeholder-slate-500 uppercase focus:outline-none focus:border-qth-orange"
+              />
+              {buscaTexto && (
+                <button
+                  type="button"
+                  onClick={() => setBuscaTexto('')}
+                  className="text-slate-400 hover:text-white absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer"
+                  title="Limpar pesquisa"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-bold text-slate-300 bg-qth-card border border-slate-700 px-2.5 py-1.5 rounded-lg">
+                {perfisFiltrados.length} DE {perfis.length}
+              </span>
+              {temFiltroAtivo && (
+                <button
+                  type="button"
+                  onClick={limparFiltros}
+                  className="bg-slate-800 hover:bg-slate-700 text-qth-orange border border-slate-600 font-bold px-2.5 py-1.5 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  LIMPAR FILTROS
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2.5">
+            <SelectPesquisavel
+              label="Cargo"
+              opcoes={['TODOS', ...TODOS_CARGOS]}
+              valor={filtroCargo}
+              onChange={setFiltroCargo}
+              placeholder="TODOS"
+            />
+
+            <SelectPesquisavel
+              label="Base"
+              opcoes={['TODAS', ...opcoesBases]}
+              valor={filtroBase}
+              onChange={setFiltroBase}
+              placeholder="TODAS"
+            />
+
+            <SelectPesquisavel
+              label="Município"
+              opcoes={opcoesMunicipiosFiltro}
+              valor={filtroMunicipio}
+              onChange={setFiltroMunicipio}
+              placeholder="TODOS"
+            />
+
+            <SelectPesquisavel
+              label="Função na VTR"
+              opcoes={opcoesFuncoesFiltro}
+              valor={filtroFuncao}
+              onChange={setFiltroFuncao}
+              placeholder="TODAS"
+            />
+
+            <SelectPesquisavel
+              label="Viatura Atual"
+              opcoes={opcoesViaturasFiltro}
+              valor={filtroViatura}
+              onChange={setFiltroViatura}
+              placeholder="TODAS"
+            />
+
+            <SelectPesquisavel
+              label="Status da Conta"
+              opcoes={['TODOS', ...STATUS_ATIVO]}
+              valor={filtroStatusConta}
+              onChange={setFiltroStatusConta}
+              placeholder="TODOS"
+            />
+          </div>
+        </div>
+
         {/* Lista de Usuários */}
         {carregando ? (
           <p className="text-xs text-slate-400 py-4 text-center">CARREGANDO EQUIPES...</p>
-        ) : perfis.length === 0 ? (
-          <p className="text-xs text-slate-400 py-4 text-center">
-            NENHUM USUÁRIO ENCONTRADO.
-          </p>
+        ) : perfisFiltrados.length === 0 ? (
+          <div className="py-6 text-center space-y-2">
+            <p className="text-xs text-slate-400">
+              NENHUM USUÁRIO ENCONTRADO COM OS FILTROS ATUAIS.
+            </p>
+            {temFiltroAtivo && (
+              <button
+                type="button"
+                onClick={limparFiltros}
+                className="text-xs font-bold text-qth-orange hover:underline cursor-pointer"
+              >
+                LIMPAR FILTROS
+              </button>
+            )}
+          </div>
         ) : (
           <div className="space-y-2.5">
-            {perfis.map((u) => {
+            {perfisFiltrados.map((u) => {
               const aberto = expandidoId === u.id
               const cargoAlvo = (u.cargo || 'SEM CARGO').toUpperCase()
               const bloqueadoPorHierarquia = !isGestor && cargoAlvo === 'GESTOR'
               const prefixoVtrEdit =
                 viaturas.find((v) => v.id === formEdit.viatura_atual_id)?.prefixo?.toUpperCase() || ''
+              const prefixoVtrCard = u.viatura_atual_id
+                ? mapaPrefixoPorId.get(u.viatura_atual_id) || ''
+                : ''
 
               return (
                 <div
@@ -487,6 +718,8 @@ export default function PainelGestor({ perfilLogado }) {
                       </p>
                       <p className="text-[11px] text-slate-400 mt-0.5">
                         MAT: {u.matricula || '—'} • BASE: {u.base || '—'} • {u.municipio_lotacao || '—'}
+                        {u.funcao_vtr ? ` • ${u.funcao_vtr.toUpperCase()}` : ''}
+                        {prefixoVtrCard ? ` • VTR: ${prefixoVtrCard}` : ''}
                       </p>
                     </div>
 

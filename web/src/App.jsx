@@ -4,6 +4,7 @@ import Login from './components/Login'
 import PrimeiroAcesso from './components/PrimeiroAcesso'
 import { LogOut, Radio, Settings, ShieldAlert, Truck, User } from 'lucide-react'
 
+const PainelCentral = lazy(() => import('./components/PainelCentral'))
 const PainelFrota = lazy(() => import('./components/PainelFrota'))
 const PainelGestor = lazy(() => import('./components/PainelGestor'))
 const PainelPerfil = lazy(() => import('./components/PainelPerfil'))
@@ -13,6 +14,11 @@ export default function App() {
   const [perfil, setPerfil] = useState(null)
   const [carregando, setCarregando] = useState(true)
   const [abaAtiva, setAbaAtiva] = useState('CENTRAL')
+  const [abasVisitadas, setAbasVisitadas] = useState({ CENTRAL: true })
+
+  useEffect(() => {
+    setAbasVisitadas((prev) => (prev[abaAtiva] ? prev : { ...prev, [abaAtiva]: true }))
+  }, [abaAtiva])
 
   useEffect(() => {
     function handleCliqueAreaVazia(e) {
@@ -34,26 +40,45 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      if (session) carregarPerfil(session.user.id)
-      else setCarregando(false)
-    })
+    let ativo = true
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-      if (session) carregarPerfil(session.user.id)
-      else {
-        setPerfil(null)
+    supabase.auth.getSession().then(({ data: { session: sessaoAtual } }) => {
+      if (!ativo) return
+      setSession(sessaoAtual)
+      if (sessaoAtual?.user?.id) {
+        carregarPerfil(sessaoAtual.user.id, { bloquearTela: true })
+      } else {
         setCarregando(false)
       }
     })
 
-    return () => subscription.unsubscribe()
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, novaSessao) => {
+      if (!ativo) return
+      setSession(novaSessao)
+
+      if (!novaSessao) {
+        setPerfil(null)
+        setCarregando(false)
+        return
+      }
+
+      if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+        carregarPerfil(novaSessao.user.id, { bloquearTela: !perfil })
+      } else if (event === 'TOKEN_REFRESHED' && !perfil) {
+        carregarPerfil(novaSessao.user.id, { bloquearTela: false })
+      }
+    })
+
+    return () => {
+      ativo = false
+      subscription.unsubscribe()
+    }
   }, [])
 
-  async function carregarPerfil(userId) {
-    setCarregando(true)
+  async function carregarPerfil(userId, { bloquearTela = false } = {}) {
+    if (bloquearTela) setCarregando(true)
     const { data, error } = await supabase
       .from('perfis')
       .select('*')
@@ -62,10 +87,10 @@ export default function App() {
 
     if (!error && data) {
       setPerfil(data)
-    } else {
+    } else if (!perfil) {
       setPerfil(null)
     }
-    setCarregando(false)
+    if (bloquearTela) setCarregando(false)
   }
 
   async function handleLogout() {
@@ -111,12 +136,11 @@ export default function App() {
     )
   }
 
-  // Bloqueio obrigatório de primeiro acesso
   if (perfil.primeiro_acesso) {
     return (
       <PrimeiroAcesso
         perfil={perfil}
-        onConcluido={() => carregarPerfil(session.user.id)}
+        onConcluido={() => carregarPerfil(session.user.id, { bloquearTela: false })}
         onLogout={handleLogout}
       />
     )
@@ -136,10 +160,11 @@ export default function App() {
           <nav className="flex items-center gap-1 flex-wrap">
             <button
               onClick={() => setAbaAtiva('CENTRAL')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${abaAtiva === 'CENTRAL'
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                abaAtiva === 'CENTRAL'
                   ? 'bg-qth-orange text-white'
                   : 'text-slate-300 hover:bg-slate-700/60'
-                }`}
+              }`}
             >
               <Radio className="w-3.5 h-3.5" />
               <span>CENTRAL</span>
@@ -148,10 +173,11 @@ export default function App() {
             {podeAcessarFrota && (
               <button
                 onClick={() => setAbaAtiva('FROTA')}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${abaAtiva === 'FROTA'
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  abaAtiva === 'FROTA'
                     ? 'bg-qth-orange text-white'
                     : 'text-slate-300 hover:bg-slate-700/60'
-                  }`}
+                }`}
               >
                 <Truck className="w-3.5 h-3.5" />
                 <span>FROTA</span>
@@ -161,10 +187,11 @@ export default function App() {
             {isGestorOuCoord && (
               <button
                 onClick={() => setAbaAtiva('GESTOR')}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${abaAtiva === 'GESTOR'
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  abaAtiva === 'GESTOR'
                     ? 'bg-qth-orange text-white'
                     : 'text-slate-300 hover:bg-slate-700/60'
-                  }`}
+                }`}
               >
                 <Settings className="w-3.5 h-3.5" />
                 <span>GESTOR</span>
@@ -173,10 +200,11 @@ export default function App() {
 
             <button
               onClick={() => setAbaAtiva('PERFIL')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${abaAtiva === 'PERFIL'
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                abaAtiva === 'PERFIL'
                   ? 'bg-qth-orange text-white'
                   : 'text-slate-300 hover:bg-slate-700/60'
-                }`}
+              }`}
             >
               <User className="w-3.5 h-3.5" />
               <span>PERFIL</span>
@@ -207,31 +235,32 @@ export default function App() {
             </div>
           }
         >
-          {abaAtiva === 'CENTRAL' && (
-            <div className="bg-qth-card/60 border border-slate-700/60 rounded-xl p-6 text-center">
-              <p className="text-sm font-bold text-qth-orange">
-                PAINEL DA CENTRAL DE REGULAÇÃO
-              </p>
-              <p className="text-xs text-slate-400 mt-1">
-                Próximo passo: Cards de Ocorrências (3 níveis), Empenho Multi-VTR, Códigos J e QTA.
-              </p>
+          {abasVisitadas.CENTRAL && (
+            <div className={abaAtiva === 'CENTRAL' ? 'block' : 'hidden'}>
+              <PainelCentral perfil={perfil} />
             </div>
           )}
 
-          {abaAtiva === 'FROTA' && podeAcessarFrota && (
-            <PainelFrota perfil={perfil} />
+          {abasVisitadas.FROTA && podeAcessarFrota && (
+            <div className={abaAtiva === 'FROTA' ? 'block' : 'hidden'}>
+              <PainelFrota perfil={perfil} />
+            </div>
           )}
 
-          {abaAtiva === 'GESTOR' && isGestorOuCoord && (
-            <PainelGestor perfilLogado={perfil} />
+          {abasVisitadas.GESTOR && isGestorOuCoord && (
+            <div className={abaAtiva === 'GESTOR' ? 'block' : 'hidden'}>
+              <PainelGestor perfilLogado={perfil} />
+            </div>
           )}
 
-          {abaAtiva === 'PERFIL' && (
-            <PainelPerfil
-              perfil={perfil}
-              sessionEmail={session.user.email}
-              onPerfilAtualizado={() => carregarPerfil(session.user.id)}
-            />
+          {abasVisitadas.PERFIL && (
+            <div className={abaAtiva === 'PERFIL' ? 'block' : 'hidden'}>
+              <PainelPerfil
+                perfil={perfil}
+                sessionEmail={session.user.email}
+                onPerfilAtualizado={() => carregarPerfil(session.user.id, { bloquearTela: false })}
+              />
+            </div>
           )}
         </Suspense>
       </main>

@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { registrarAuditoria, registrarAlteracoesEmLote } from '../lib/auditoria'
 import SelectPesquisavel from './SelectPesquisavel'
 import cidadesData from '../data/cidades.json'
-import { Truck, Plus, Edit3, Trash2, Save, X, Gauge } from 'lucide-react'
+import { Truck, Plus, Edit3, Trash2, Save, X, Gauge, Search, RotateCcw } from 'lucide-react'
 
 const TIPOS_VTR = ['USA', 'USB', 'MOTOLANCIA', 'AEROMEDICO', 'VIR', 'APOIO']
 const STATUS_VTR = [
@@ -17,6 +17,22 @@ const STATUS_VTR = [
   'QTI BASE QAP',
   'QTI BASE SEM CONDICOES',
   'SEM CONDICOES',
+  'INTERCORRENCIA',
+  'BAIXADA',
+]
+
+const STATUS_LIVRES_QAP = ['DISPONIVEL', 'QTI BASE QAP']
+const STATUS_EM_ATENDIMENTO = [
+  'ACIONADA',
+  'EMPENHADA',
+  'QTI',
+  'NO QTH',
+  'QTI UNIDADE SAUDE',
+  'NA UNIDADE SAUDE',
+]
+const STATUS_INDISPONIVEIS = [
+  'SEM CONDICOES',
+  'QTI BASE SEM CONDICOES',
   'INTERCORRENCIA',
   'BAIXADA',
 ]
@@ -41,6 +57,15 @@ export default function PainelFrota({ perfil }) {
   const [salvando, setSalvando] = useState(false)
   const [erro, setErro] = useState('')
 
+  // Pesquisa global e filtros da aba FROTA
+  const [buscaTexto, setBuscaTexto] = useState('')
+  const [chipGrupo, setChipGrupo] = useState('TODOS')
+  const [filtroStatus, setFiltroStatus] = useState('TODOS')
+  const [filtroTipo, setFiltroTipo] = useState('TODOS')
+  const [filtroCidade, setFiltroCidade] = useState('TODAS')
+  const [filtroEstado, setFiltroEstado] = useState('TODAS')
+  const [filtroVinculoPlaca, setFiltroVinculoPlaca] = useState('TODAS')
+
   const listaEstados = useMemo(
     () => (cidadesData?.estados || []).map((e) => e.sigla.toUpperCase()).sort(),
     []
@@ -57,6 +82,24 @@ export default function PainelFrota({ perfil }) {
     () => veiculos.map((v) => v.placa.toUpperCase()).sort(),
     [veiculos]
   )
+
+  const opcoesCidadesFiltro = useMemo(() => {
+    const setCid = new Set()
+    for (const v of viaturas) {
+      const c = (v.cidade || v.base_cidade || '').trim().toUpperCase()
+      if (c) setCid.add(c)
+    }
+    return ['TODAS', ...Array.from(setCid).sort()]
+  }, [viaturas])
+
+  const opcoesEstadosFiltro = useMemo(() => {
+    const setUf = new Set()
+    for (const v of viaturas) {
+      const uf = (v.estado || '').trim().toUpperCase()
+      if (uf) setUf.add(uf)
+    }
+    return ['TODAS', ...Array.from(setUf).sort()]
+  }, [viaturas])
 
   useEffect(() => {
     buscarFrota()
@@ -93,6 +136,77 @@ export default function PainelFrota({ perfil }) {
     if (dataVecs) setVeiculos(dataVecs)
     setCarregando(false)
   }
+
+  const temFiltroAtivo =
+    buscaTexto.trim() !== '' ||
+    chipGrupo !== 'TODOS' ||
+    filtroStatus !== 'TODOS' ||
+    filtroTipo !== 'TODOS' ||
+    filtroCidade !== 'TODAS' ||
+    filtroEstado !== 'TODAS' ||
+    filtroVinculoPlaca !== 'TODAS'
+
+  function limparFiltros() {
+    setBuscaTexto('')
+    setChipGrupo('TODOS')
+    setFiltroStatus('TODOS')
+    setFiltroTipo('TODOS')
+    setFiltroCidade('TODAS')
+    setFiltroEstado('TODAS')
+    setFiltroVinculoPlaca('TODAS')
+  }
+
+  const viaturasFiltradas = useMemo(() => {
+    const termo = buscaTexto.trim().toUpperCase()
+
+    return viaturas.filter((vtr) => {
+      const prefixo = (vtr.prefixo || '').toUpperCase()
+      const placaReal = (vtr.veiculo?.placa || vtr.placa || '').toUpperCase()
+      const kmReal = String(vtr.veiculo?.km_atual ?? vtr.km_atual ?? '').toUpperCase()
+      const tipo = (vtr.tipo || '').toUpperCase()
+      const cidade = (vtr.cidade || vtr.base_cidade || '').toUpperCase()
+      const estado = (vtr.estado || '').toUpperCase()
+      const status = (vtr.status || '').toUpperCase()
+
+      if (termo) {
+        const match =
+          prefixo.includes(termo) ||
+          placaReal.includes(termo) ||
+          cidade.includes(termo) ||
+          estado.includes(termo) ||
+          tipo.includes(termo) ||
+          status.includes(termo) ||
+          kmReal.includes(termo)
+        if (!match) return false
+      }
+
+      if (chipGrupo === 'LIVRES' && !STATUS_LIVRES_QAP.includes(status)) return false
+      if (chipGrupo === 'ATENDIMENTO' && !STATUS_EM_ATENDIMENTO.includes(status)) return false
+      if (chipGrupo === 'INDISPONIVEIS' && !STATUS_INDISPONIVEIS.includes(status)) return false
+
+      if (filtroStatus !== 'TODOS' && status !== filtroStatus) return false
+      if (filtroTipo !== 'TODOS' && tipo !== filtroTipo) return false
+      if (filtroCidade !== 'TODAS' && cidade !== filtroCidade) return false
+      if (filtroEstado !== 'TODAS' && estado !== filtroEstado) return false
+
+      if (filtroVinculoPlaca !== 'TODAS') {
+        const temPlaca = Boolean(vtr.veiculo?.placa || vtr.placa)
+        if (filtroVinculoPlaca === 'COM PLACA VINCULADA' && !temPlaca) return false
+        if (filtroVinculoPlaca === 'SEM PLACA VINCULADA' && temPlaca) return false
+      }
+
+      return true
+    })
+  }, [
+    viaturas,
+    buscaTexto,
+    chipGrupo,
+    filtroStatus,
+    filtroTipo,
+    filtroCidade,
+    filtroEstado,
+    filtroVinculoPlaca,
+  ])
 
   function handlePlacaChange(novaPlaca) {
     const placaUpper = novaPlaca.trim().toUpperCase()
@@ -139,7 +253,6 @@ export default function PainelFrota({ perfil }) {
     const kmLimpo = form.km_atual.replace(/\D/g, '')
     const cidadeUpper = form.cidade.trim().toUpperCase()
 
-    // 1. Cria ou atualiza o veículo físico (Placa -> KM)
     const veiculoAnterior = veiculos.find((v) => v.placa.toUpperCase() === placaUpper)
 
     const { data: veiculoSalvo, error: errVeiculo } = await supabase
@@ -161,7 +274,6 @@ export default function PainelFrota({ perfil }) {
       return
     }
 
-    // Registra auditoria específica de KM na placa, se mudou
     if (veiculoAnterior && String(veiculoAnterior.km_atual || '') !== String(kmLimpo)) {
       await registrarAuditoria({
         perfil,
@@ -183,7 +295,6 @@ export default function PainelFrota({ perfil }) {
       })
     }
 
-    // 2. Salva ou atualiza a viatura operacional vinculada à placa
     const payload = {
       prefixo: form.prefixo.trim().toUpperCase(),
       placa: placaUpper,
@@ -266,8 +377,14 @@ export default function PainelFrota({ perfil }) {
   }
 
   function corStatus(status) {
-    if (status === 'DISPONIVEL') return 'bg-qth-green/20 text-green-400 border-qth-green/50'
-    if (status === 'BAIXADA' || status === 'INTERCORRENCIA' || status === 'SEM CONDICOES')
+    if (status === 'DISPONIVEL' || status === 'QTI BASE QAP')
+      return 'bg-qth-green/20 text-green-400 border-qth-green/50'
+    if (
+      status === 'BAIXADA' ||
+      status === 'INTERCORRENCIA' ||
+      status === 'SEM CONDICOES' ||
+      status === 'QTI BASE SEM CONDICOES'
+    )
       return 'bg-qth-red/20 text-red-400 border-qth-red/50'
     return 'bg-qth-yellow/20 text-yellow-300 border-qth-yellow/50'
   }
@@ -389,16 +506,137 @@ export default function PainelFrota({ perfil }) {
         )}
       </form>
 
+      {/* Pesquisa Global e Filtros da Aba FROTA */}
+      <div className="bg-qth-card border border-slate-700/70 rounded-xl p-3.5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={buscaTexto}
+              onChange={(e) => setBuscaTexto(e.target.value.toUpperCase())}
+              placeholder="PESQUISAR POR PREFIXO, PLACA, CIDADE, UF, TIPO OU KM..."
+              className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg pl-9 pr-8 py-2 text-xs font-semibold text-white placeholder-slate-500 uppercase focus:outline-none focus:border-qth-orange"
+            />
+            {buscaTexto && (
+              <button
+                type="button"
+                onClick={() => setBuscaTexto('')}
+                className="text-slate-400 hover:text-white absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer"
+                title="Limpar pesquisa"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-bold text-slate-300 bg-qth-bg/80 border border-slate-700 px-2.5 py-1.5 rounded-lg">
+              {viaturasFiltradas.length} DE {viaturas.length}
+            </span>
+            {temFiltroAtivo && (
+              <button
+                type="button"
+                onClick={limparFiltros}
+                className="bg-slate-800 hover:bg-slate-700 text-qth-orange border border-slate-600 font-bold px-2.5 py-1.5 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <RotateCcw className="w-3 h-3" />
+                LIMPAR FILTROS
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Chips Rápidos de Status */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {[
+            { id: 'TODOS', label: 'TODAS' },
+            { id: 'LIVRES', label: 'LIVRES / QAP' },
+            { id: 'ATENDIMENTO', label: 'EM ATENDIMENTO' },
+            { id: 'INDISPONIVEIS', label: 'INDISPONÍVEIS / BAIXADAS' },
+          ].map((chip) => {
+            const ativo = chipGrupo === chip.id
+            return (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setChipGrupo(chip.id)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase cursor-pointer transition-colors border ${ativo
+                    ? 'bg-qth-orange text-white border-qth-orange'
+                    : 'bg-qth-bg/70 text-slate-300 border-slate-700 hover:border-slate-500'
+                  }`}
+              >
+                {chip.label}
+              </button>
+            )
+          })}
+        </div>
+
+        {/* Filtros Específicos */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
+          <SelectPesquisavel
+            label="Status"
+            opcoes={['TODOS', ...STATUS_VTR]}
+            valor={filtroStatus}
+            onChange={setFiltroStatus}
+            placeholder="TODOS"
+          />
+
+          <SelectPesquisavel
+            label="Tipo"
+            opcoes={['TODOS', ...TIPOS_VTR]}
+            valor={filtroTipo}
+            onChange={setFiltroTipo}
+            placeholder="TODOS"
+          />
+
+          <SelectPesquisavel
+            label="Cidade / Base"
+            opcoes={opcoesCidadesFiltro}
+            valor={filtroCidade}
+            onChange={setFiltroCidade}
+            placeholder="TODAS"
+          />
+
+          <SelectPesquisavel
+            label="UF"
+            opcoes={opcoesEstadosFiltro}
+            valor={filtroEstado}
+            onChange={setFiltroEstado}
+            placeholder="TODAS"
+          />
+
+          <SelectPesquisavel
+            label="Vínculo de Placa"
+            opcoes={['TODAS', 'COM PLACA VINCULADA', 'SEM PLACA VINCULADA']}
+            valor={filtroVinculoPlaca}
+            onChange={setFiltroVinculoPlaca}
+            placeholder="TODAS"
+          />
+        </div>
+      </div>
+
       {/* Lista de Viaturas */}
       {carregando ? (
         <p className="text-xs text-slate-400 text-center py-6">CARREGANDO FROTA...</p>
-      ) : viaturas.length === 0 ? (
-        <p className="text-xs text-slate-400 text-center py-6">
-          NENHUMA VIATURA CADASTRADA.
-        </p>
+      ) : viaturasFiltradas.length === 0 ? (
+        <div className="py-6 text-center space-y-2">
+          <p className="text-xs text-slate-400">
+            NENHUMA VIATURA ENCONTRADA COM OS FILTROS ATUAIS.
+          </p>
+          {temFiltroAtivo && (
+            <button
+              type="button"
+              onClick={limparFiltros}
+              className="text-xs font-bold text-qth-orange hover:underline cursor-pointer"
+            >
+              LIMPAR FILTROS
+            </button>
+          )}
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {viaturas.map((vtr) => {
+          {viaturasFiltradas.map((vtr) => {
             const placaExibicao = vtr.veiculo?.placa || vtr.placa
             const kmExibicao = vtr.veiculo?.km_atual || vtr.km_atual || '0'
 
