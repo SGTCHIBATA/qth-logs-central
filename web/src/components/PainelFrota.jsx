@@ -4,7 +4,21 @@ import { registrarAuditoria, registrarAlteracoesEmLote } from '../lib/auditoria'
 import SelectPesquisavel from './SelectPesquisavel'
 import FiltroMultiSelecao from './FiltroMultiSelecao'
 import cidadesData from '../data/cidades.json'
-import { Truck, Plus, Edit3, Trash2, Save, X, Gauge, Search, RotateCcw, Building2 } from 'lucide-react'
+import {
+  Truck,
+  Plus,
+  Edit3,
+  Trash2,
+  Save,
+  X,
+  Gauge,
+  Search,
+  RotateCcw,
+  Building2,
+  KeyRound,
+  Copy,
+  Check,
+} from 'lucide-react'
 
 const TIPOS_VTR = ['USA', 'USB', 'MOTOLANCIA', 'AEROMEDICO', 'VIR', 'APOIO']
 const STATUS_VTR = [
@@ -49,6 +63,32 @@ const FORM_INICIAL = {
   status: '',
 }
 
+function gerarCredenciaisRecurso(prefixo, instituicaoObj) {
+  const limpo = String(prefixo || '').trim().toUpperCase()
+  const semEspaco = limpo.replace(/\s+/g, '')
+  const sigla = String(instituicaoObj?.sigla || '').trim().toUpperCase().replace(/\s+/g, '')
+  const uf = String(instituicaoObj?.uf || '').trim().toUpperCase().replace(/\s+/g, '')
+
+  if (!semEspaco) {
+    return {
+      loginRecurso: '',
+      emailLogin: '',
+      senhaPadrao: '',
+    }
+  }
+
+  const emailComposto =
+    sigla && uf
+      ? `${semEspaco}${sigla}${uf}@QTHLOGS.LOCAL`
+      : `${semEspaco}@QTHLOGS.LOCAL`
+
+  return {
+    loginRecurso: limpo,
+    emailLogin: emailComposto,
+    senhaPadrao: `${semEspaco}@123`,
+  }
+}
+
 export default function PainelFrota({ perfil }) {
   const [viaturas, setViaturas] = useState([])
   const [veiculos, setVeiculos] = useState([])
@@ -59,6 +99,14 @@ export default function PainelFrota({ perfil }) {
   const [vtrOriginal, setVtrOriginal] = useState(null)
   const [salvando, setSalvando] = useState(false)
   const [erro, setErro] = useState('')
+  const [credencialGerada, setCredencialGerada] = useState(null)
+  const [copiado, setCopiado] = useState(false)
+
+  // Modal de alteração/redefinição de senha por coordenador ou gestor
+  const [vtrSenhaAlvo, setVtrSenhaAlvo] = useState(null)
+  const [novaSenhaRecurso, setNovaSenhaRecurso] = useState('')
+  const [salvandoSenha, setSalvandoSenha] = useState(false)
+  const [erroSenha, setErroSenha] = useState('')
 
   // Pesquisa global e filtros da aba FROTA
   const [buscaTexto, setBuscaTexto] = useState('')
@@ -69,6 +117,21 @@ export default function PainelFrota({ perfil }) {
   const [filtroCidades, setFiltroCidades] = useState([])
   const [filtroEstados, setFiltroEstados] = useState([])
   const [filtroVinculosPlaca, setFiltroVinculosPlaca] = useState([])
+
+  const podeGerirSenha = useMemo(() => {
+    const cargo = String(perfil?.cargo || perfil?.role || '').toUpperCase()
+    return !cargo || cargo.includes('COORD') || cargo.includes('GEST') || cargo.includes('ADMIN')
+  }, [perfil])
+
+  const instituicaoSelecionadaObj = useMemo(
+    () => instituicoes.find((i) => i.id === (form.instituicao_id || perfil?.instituicao_id)) || null,
+    [instituicoes, form.instituicao_id, perfil?.instituicao_id]
+  )
+
+  const previaCredencial = useMemo(
+    () => gerarCredenciaisRecurso(form.prefixo, instituicaoSelecionadaObj),
+    [form.prefixo, instituicaoSelecionadaObj]
+  )
 
   const listaEstados = useMemo(
     () => (cidadesData?.estados || []).map((e) => e.sigla.toUpperCase()).sort(),
@@ -86,6 +149,14 @@ export default function PainelFrota({ perfil }) {
     const map = {}
     for (const inst of instituicoes) {
       map[inst.id] = (inst.sigla || inst.nome || '').toUpperCase()
+    }
+    return map
+  }, [instituicoes])
+
+  const mapaInstituicoesObj = useMemo(() => {
+    const map = {}
+    for (const inst of instituicoes) {
+      map[inst.id] = inst
     }
     return map
   }, [instituicoes])
@@ -281,8 +352,16 @@ export default function PainelFrota({ perfil }) {
   async function handleSalvar(e) {
     e.preventDefault()
     setErro('')
+
+    const instituicaoEscolhida = form.instituicao_id || perfil?.instituicao_id || null
+    if (!instituicaoEscolhida) {
+      setErro('Selecione a Instituição Vinculada para criar/atualizar a credencial da viatura.')
+      return
+    }
+
     setSalvando(true)
 
+    const prefixoUpper = form.prefixo.trim().toUpperCase()
     const placaUpper = form.placa.trim().toUpperCase()
     const kmLimpo = String(form.km_atual || '').replace(/\D/g, '')
     const cidadeUpper = form.cidade.trim().toUpperCase()
@@ -329,10 +408,11 @@ export default function PainelFrota({ perfil }) {
       })
     }
 
-    const instituicaoEscolhida = form.instituicao_id || perfil?.instituicao_id || null
+    const instObj = mapaInstituicoesObj[instituicaoEscolhida] || null
+    const credAuto = gerarCredenciaisRecurso(prefixoUpper, instObj)
 
     const payload = {
-      prefixo: form.prefixo.trim().toUpperCase(),
+      prefixo: prefixoUpper,
       placa: placaUpper,
       veiculo_id: veiculoSalvo.id,
       instituicao_id: instituicaoEscolhida,
@@ -374,20 +454,101 @@ export default function PainelFrota({ perfil }) {
       if (error) {
         setErro(`Erro ao cadastrar viatura: ${error.message}`)
       } else {
+        const { data: credRpcData, error: errCred } = await supabase.rpc('upsert_credencial_viatura', {
+          p_instituicao_id: instituicaoEscolhida,
+          p_viatura_id: data?.id || null,
+          p_prefixo: credAuto.loginRecurso,
+          p_senha: credAuto.senhaPadrao,
+        })
+
+        if (errCred) {
+          setErro(`Viatura cadastrada, mas falhou ao gerar acesso: ${errCred.message}`)
+        }
+
+        const emailFinal = credRpcData?.email_login || credAuto.emailLogin
+
         await registrarAuditoria({
           perfil,
           tabela: 'viaturas',
           registroId: data?.id,
           acao: 'CRIACAO',
           campo: 'VIATURA',
-          valorNovo: `${payload.prefixo} (${placaUpper}) - KM: ${kmLimpo || '0'}`,
+          valorNovo: `${payload.prefixo} (${placaUpper}) - KM: ${kmLimpo || '0'} | LOGIN: ${emailFinal}`,
         })
-        setForm(FORM_INICIAL)
+
+        if (!errCred) {
+          setCredencialGerada({
+            prefixo: credAuto.loginRecurso,
+            emailLogin: emailFinal,
+            senhaInicial: credAuto.senhaPadrao,
+          })
+          setCopiado(false)
+          setForm(FORM_INICIAL)
+        }
         buscarFrota()
       }
     }
 
     setSalvando(false)
+  }
+
+  function abrirModalSenha(vtr) {
+    const instObj = mapaInstituicoesObj[vtr.instituicao_id] || null
+    const padrao = gerarCredenciaisRecurso(vtr.prefixo, instObj).senhaPadrao
+    setVtrSenhaAlvo(vtr)
+    setNovaSenhaRecurso(padrao)
+    setErroSenha('')
+  }
+
+  async function handleSalvarNovaSenha(e) {
+    e.preventDefault()
+    if (!vtrSenhaAlvo) return
+    const senhaLimpa = novaSenhaRecurso.trim()
+    if (senhaLimpa.length < 6) {
+      setErroSenha('A senha deve ter pelo menos 6 caracteres.')
+      return
+    }
+
+    setSalvandoSenha(true)
+    setErroSenha('')
+
+    const instituicaoAlvoId = vtrSenhaAlvo.instituicao_id || perfil?.instituicao_id || null
+    const instObj = mapaInstituicoesObj[instituicaoAlvoId] || null
+    const cred = gerarCredenciaisRecurso(vtrSenhaAlvo.prefixo, instObj)
+
+    const { error: errRpc } = await supabase.rpc('alterar_senha_viatura', {
+      p_instituicao_id: instituicaoAlvoId,
+      p_viatura_id: vtrSenhaAlvo.id,
+      p_prefixo: cred.loginRecurso,
+      p_nova_senha: senhaLimpa,
+    })
+
+    if (errRpc) {
+      setErroSenha(`Erro ao atualizar senha do recurso: ${errRpc.message}`)
+      setSalvandoSenha(false)
+      return
+    }
+
+    await registrarAuditoria({
+      perfil,
+      tabela: 'viaturas',
+      registroId: vtrSenhaAlvo.id,
+      acao: 'EDICAO',
+      campo: `SENHA_RECURSO_${cred.loginRecurso}`,
+      valorAnterior: 'SENHA_ANTERIOR',
+      valorNovo: senhaLimpa === cred.senhaPadrao ? 'RESET_PADRAO_RECURSO' : 'SENHA_ALTERADA_GESTOR',
+    })
+
+    setSalvandoSenha(false)
+    setVtrSenhaAlvo(null)
+    setNovaSenhaRecurso('')
+  }
+
+  function copiarCredencialTexto(texto) {
+    if (!texto) return
+    navigator.clipboard?.writeText(texto)
+    setCopiado(true)
+    setTimeout(() => setCopiado(false), 2000)
   }
 
   async function handleExcluir(vtr) {
@@ -426,14 +587,57 @@ export default function PainelFrota({ perfil }) {
     return 'bg-qth-yellow/20 text-yellow-300 border-qth-yellow/50'
   }
 
+  const credModalSenha = vtrSenhaAlvo
+    ? gerarCredenciaisRecurso(vtrSenhaAlvo.prefixo, mapaInstituicoesObj[vtrSenhaAlvo.instituicao_id])
+    : null
+
   return (
     <div className="space-y-4">
+      {/* Confirmação de Credencial Gerada Automaticamente */}
+      {credencialGerada && (
+        <div className="bg-emerald-950/50 border border-emerald-500/50 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-0.5 text-xs">
+            <p className="font-extrabold text-emerald-300 uppercase flex items-center gap-1.5">
+              <KeyRound className="w-4 h-4" />
+              Acesso do Recurso Criado — {credencialGerada.prefixo}
+            </p>
+            <p className="text-slate-200">
+              E-mail de Login: <strong className="text-white">{credencialGerada.emailLogin}</strong> • Senha Inicial:{' '}
+              <strong className="text-qth-yellow">{credencialGerada.senhaInicial}</strong>
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                copiarCredencialTexto(
+                  `E-mail: ${credencialGerada.emailLogin}\nSenha: ${credencialGerada.senhaInicial}`
+                )
+              }
+              className="bg-emerald-700 hover:bg-emerald-600 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1 cursor-pointer"
+            >
+              {copiado ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              {copiado ? 'COPIADO' : 'COPIAR'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setCredencialGerada(null)}
+              className="text-slate-400 hover:text-white p-1 cursor-pointer"
+              title="Fechar aviso"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Formulário de Cadastro / Edição */}
       <form
         onSubmit={handleSalvar}
         className="bg-qth-card border border-slate-700/70 rounded-xl p-4 space-y-3"
       >
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <h2 className="text-sm font-extrabold text-qth-orange flex items-center gap-2 uppercase">
             <Truck className="w-4 h-4" />
             {editandoId ? `Editando ${form.prefixo}` : 'Cadastrar Nova Viatura'}
@@ -484,14 +688,15 @@ export default function PainelFrota({ perfil }) {
 
           <div>
             <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
-              Instituição Vinculada
+              Instituição Vinculada <span className="text-qth-orange">*</span>
             </label>
             <select
+              required
               value={form.instituicao_id}
               onChange={(e) => setForm({ ...form, instituicao_id: e.target.value })}
               className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
             >
-              <option value="">PADRÃO / SEM VÍNCULO</option>
+              <option value="">SELECIONE A INSTITUIÇÃO</option>
               {instituicoes.map((inst) => (
                 <option key={inst.id} value={inst.id}>
                   {(inst.sigla ? `${inst.sigla} - ` : '') + inst.nome}
@@ -541,6 +746,19 @@ export default function PainelFrota({ perfil }) {
             onChange={(val) => setForm({ ...form, status: val })}
             required
           />
+
+          {!editandoId && previaCredencial.emailLogin && (
+            <div className="sm:col-span-2 lg:col-span-4 bg-qth-bg/70 border border-slate-700/80 rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <span className="text-slate-300">
+                <strong className="text-qth-orange">E-MAIL DE LOGIN DO RECURSO:</strong>{' '}
+                {previaCredencial.emailLogin}
+              </span>
+              <span className="text-slate-300">
+                <strong className="text-qth-yellow">SENHA INICIAL PADRÃO:</strong>{' '}
+                {previaCredencial.senhaPadrao}
+              </span>
+            </div>
+          )}
 
           <div className="sm:col-span-2 lg:col-span-4 flex justify-end pt-1">
             <button
@@ -744,7 +962,18 @@ export default function PainelFrota({ perfil }) {
                   </div>
 
                   <div className="flex items-center gap-1.5">
+                    {podeGerirSenha && (
+                      <button
+                        type="button"
+                        onClick={() => abrirModalSenha(vtr)}
+                        className="p-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-black transition-colors cursor-pointer"
+                        title="Alterar ou Redefinir Senha do Recurso"
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <button
+                      type="button"
                       onClick={() => iniciarEdicao(vtr)}
                       className="p-1.5 rounded-lg bg-qth-blue/20 hover:bg-qth-blue text-blue-300 hover:text-white transition-colors cursor-pointer"
                       title="Trocar Placa / Editar KM / Status / Instituição"
@@ -752,6 +981,7 @@ export default function PainelFrota({ perfil }) {
                       <Edit3 className="w-3.5 h-3.5" />
                     </button>
                     <button
+                      type="button"
                       onClick={() => handleExcluir(vtr)}
                       className="p-1.5 rounded-lg bg-qth-red/20 hover:bg-qth-red text-red-300 hover:text-white transition-colors cursor-pointer"
                       title="Remover Viatura"
@@ -763,6 +993,79 @@ export default function PainelFrota({ perfil }) {
               </div>
             )
           })}
+        </div>
+      )}
+
+      {/* Modal para Alterar ou Redefinir Senha do Recurso (Coordenadores / Gestores) */}
+      {vtrSenhaAlvo && credModalSenha && (
+        <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSalvarNovaSenha}
+            className="bg-qth-card border border-slate-600 rounded-xl p-4 w-full max-w-md space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-extrabold text-qth-orange uppercase flex items-center gap-1.5">
+                <KeyRound className="w-4 h-4" />
+                Acesso do Recurso — {vtrSenhaAlvo.prefixo}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setVtrSenhaAlvo(null)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 break-all">
+              E-mail de Login: <strong className="text-white">{credModalSenha.emailLogin}</strong>
+            </p>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
+                Nova Senha do Recurso
+              </label>
+              <input
+                type="text"
+                value={novaSenhaRecurso}
+                onChange={(e) => setNovaSenhaRecurso(e.target.value)}
+                className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white focus:outline-none focus:border-qth-orange"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setNovaSenhaRecurso(credModalSenha.senhaPadrao)}
+                className="text-[11px] font-bold text-qth-yellow hover:underline cursor-pointer"
+              >
+                RESTAURAR PADRÃO ({credModalSenha.senhaPadrao})
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVtrSenhaAlvo(null)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-700 text-white text-xs font-bold cursor-pointer"
+                >
+                  CANCELAR
+                </button>
+                <button
+                  type="submit"
+                  disabled={salvandoSenha}
+                  className="px-3 py-1.5 rounded-lg bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
+                >
+                  {salvandoSenha ? 'SALVANDO...' : 'SALVAR SENHA'}
+                </button>
+              </div>
+            </div>
+
+            {erroSenha && (
+              <p className="text-xs text-red-400 bg-qth-red/15 border border-qth-red/40 p-2 rounded-lg">
+                {erroSenha}
+              </p>
+            )}
+          </form>
         </div>
       )}
     </div>
