@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { registrarAuditoria, registrarAlteracoesEmLote } from '../lib/auditoria'
 import SelectPesquisavel from './SelectPesquisavel'
+import FiltroMultiSelecao from './FiltroMultiSelecao'
 import cidadesData from '../data/cidades.json'
 import {
   Users,
@@ -15,6 +16,9 @@ import {
   Lock,
   Search,
   RotateCcw,
+  KeyRound,
+  Eye,
+  EyeOff,
 } from 'lucide-react'
 
 const TODOS_CARGOS = [
@@ -47,38 +51,54 @@ const FORM_NOVO_INICIAL = {
   funcao_vtr: '',
   base: '',
   municipio_lotacao: '',
+  instituicao_id: '',
   viatura_atual_id: '',
   ativo: 'ATIVO',
 }
 
 export default function PainelGestor({ perfilLogado }) {
+  const isMaster = Boolean(perfilLogado?.is_platform_owner)
+  const instituicaoLogadaId = perfilLogado?.instituicao_id || ''
   const cargoLogado = (perfilLogado?.cargo || '').toUpperCase()
-  const isGestor = cargoLogado === 'GESTOR'
+  const isGestor = cargoLogado === 'GESTOR' || isMaster
+  const isCoordenador = cargoLogado === 'COORDENADOR'
   const cargosDisponiveis = isGestor
     ? TODOS_CARGOS
     : TODOS_CARGOS.filter((c) => c !== 'GESTOR')
 
   const [perfis, setPerfis] = useState([])
   const [viaturas, setViaturas] = useState([])
+  const [instituicoes, setInstituicoes] = useState([])
   const [carregando, setCarregando] = useState(true)
   const [mostrarFormNovo, setMostrarFormNovo] = useState(false)
-  const [formNovo, setFormNovo] = useState(FORM_NOVO_INICIAL)
+  const [formNovo, setFormNovo] = useState({
+    ...FORM_NOVO_INICIAL,
+    instituicao_id: instituicaoLogadaId,
+  })
   const [criando, setCriando] = useState(false)
   const [erroNovo, setErroNovo] = useState('')
   const [sucessoNovo, setSucessoNovo] = useState('')
 
   // Pesquisa global e filtros da aba GESTOR
   const [buscaTexto, setBuscaTexto] = useState('')
-  const [filtroCargo, setFiltroCargo] = useState('TODOS')
-  const [filtroBase, setFiltroBase] = useState('TODAS')
-  const [filtroMunicipio, setFiltroMunicipio] = useState('TODOS')
-  const [filtroFuncao, setFiltroFuncao] = useState('TODAS')
-  const [filtroViatura, setFiltroViatura] = useState('TODAS')
-  const [filtroStatusConta, setFiltroStatusConta] = useState('TODOS')
+  const [filtroCargos, setFiltroCargos] = useState([])
+  const [filtroBases, setFiltroBases] = useState([])
+  const [filtroMunicipios, setFiltroMunicipios] = useState([])
+  const [filtroFuncoes, setFiltroFuncoes] = useState([])
+  const [filtroViaturas, setFiltroViaturas] = useState([])
+  const [filtroStatusContas, setFiltroStatusContas] = useState([])
 
   const [expandidoId, setExpandidoId] = useState(null)
   const [formEdit, setFormEdit] = useState({})
   const [salvandoEdicao, setSalvandoEdicao] = useState(false)
+
+  // Estados para reset de senha
+  const [resetSenhaUsuarioId, setResetSenhaUsuarioId] = useState(null)
+  const [novaSenhaReset, setNovaSenhaReset] = useState('')
+  const [mostrarSenhaReset, setMostrarSenhaReset] = useState(false)
+  const [resetandoSenha, setResetandoSenha] = useState(false)
+  const [erroResetSenha, setErroResetSenha] = useState('')
+  const [sucessoResetSenha, setSucessoResetSenha] = useState('')
 
   const todasCidades = useMemo(() => {
     const lista = []
@@ -90,18 +110,24 @@ export default function PainelGestor({ perfilLogado }) {
     return lista.sort()
   }, [])
 
+  const viaturasEscopo = useMemo(() => {
+    if (isMaster) return viaturas
+    if (!instituicaoLogadaId) return viaturas
+    return viaturas.filter((v) => v.instituicao_id === instituicaoLogadaId)
+  }, [viaturas, isMaster, instituicaoLogadaId])
+
   const opcoesViaturas = useMemo(
-    () => viaturas.map((v) => v.prefixo.toUpperCase()),
-    [viaturas]
+    () => viaturasEscopo.map((v) => v.prefixo.toUpperCase()),
+    [viaturasEscopo]
   )
 
   const mapaPrefixoPorId = useMemo(() => {
     const map = new Map()
-    for (const v of viaturas) {
+    for (const v of viaturasEscopo) {
       map.set(v.id, (v.prefixo || '').toUpperCase())
     }
     return map
-  }, [viaturas])
+  }, [viaturasEscopo])
 
   const opcoesBases = useMemo(() => {
     const setBases = new Set()
@@ -118,32 +144,47 @@ export default function PainelGestor({ perfilLogado }) {
       const m = (p.municipio_lotacao || '').trim().toUpperCase()
       if (m) setMun.add(m)
     }
-    return ['TODOS', ...Array.from(setMun).sort()]
+    return Array.from(setMun).sort()
   }, [perfis])
 
   const opcoesFuncoesFiltro = useMemo(
-    () => ['TODAS', ...FUNCOES_VTR, 'SEM FUNÇÃO'],
+    () => [...FUNCOES_VTR, 'SEM FUNÇÃO'],
     []
   )
 
   const opcoesViaturasFiltro = useMemo(
-    () => ['TODAS', ...opcoesViaturas, 'SEM VIATURA'],
+    () => [...opcoesViaturas, 'SEM VIATURA'],
     [opcoesViaturas]
   )
 
   const prefixoVtrNovo = useMemo(() => {
-    const v = viaturas.find((i) => i.id === formNovo.viatura_atual_id)
+    const v = viaturasEscopo.find((i) => i.id === formNovo.viatura_atual_id)
     return v ? v.prefixo.toUpperCase() : ''
-  }, [viaturas, formNovo.viatura_atual_id])
+  }, [viaturasEscopo, formNovo.viatura_atual_id])
 
   useEffect(() => {
     buscarDados()
-  }, [])
+  }, [isMaster, instituicaoLogadaId])
 
   async function buscarDados() {
-    const [{ data: dataPerfis }, { data: dataVtrs }] = await Promise.all([
-      supabase.from('perfis').select('*'),
-      supabase.from('viaturas').select('id, prefixo').order('prefixo', { ascending: true }),
+    setCarregando(true)
+    let queryPerfis = supabase.from('perfis').select('*')
+    let queryViaturas = supabase
+      .from('viaturas')
+      .select('id, prefixo, instituicao_id')
+      .order('prefixo', { ascending: true })
+
+    if (!isMaster && instituicaoLogadaId) {
+      queryPerfis = queryPerfis.eq('instituicao_id', instituicaoLogadaId)
+      queryViaturas = queryViaturas.eq('instituicao_id', instituicaoLogadaId)
+    }
+
+    const [{ data: dataPerfis }, { data: dataVtrs }, { data: dataInsts }] = await Promise.all([
+      queryPerfis,
+      queryViaturas,
+      isMaster
+        ? supabase.from('instituicoes').select('*').order('nome', { ascending: true })
+        : Promise.resolve({ data: [] }),
     ])
 
     if (dataPerfis) {
@@ -153,26 +194,39 @@ export default function PainelGestor({ perfilLogado }) {
       setPerfis(ordenados)
     }
     if (dataVtrs) setViaturas(dataVtrs)
+    if (dataInsts) setInstituicoes(dataInsts)
     setCarregando(false)
+  }
+
+  function podeResetarSenhaAlvo(usuario) {
+    if (!isMaster && instituicaoLogadaId && usuario?.instituicao_id && usuario.instituicao_id !== instituicaoLogadaId) {
+      return false
+    }
+    const cargoAlvo = (usuario?.cargo || '').trim().toUpperCase()
+    if (isGestor) return true
+    if (isCoordenador) {
+      return cargoAlvo !== 'GESTOR' && cargoAlvo !== 'COORDENADOR'
+    }
+    return false
   }
 
   const temFiltroAtivo =
     buscaTexto.trim() !== '' ||
-    filtroCargo !== 'TODOS' ||
-    filtroBase !== 'TODAS' ||
-    filtroMunicipio !== 'TODOS' ||
-    filtroFuncao !== 'TODAS' ||
-    filtroViatura !== 'TODAS' ||
-    filtroStatusConta !== 'TODOS'
+    filtroCargos.length > 0 ||
+    filtroBases.length > 0 ||
+    filtroMunicipios.length > 0 ||
+    filtroFuncoes.length > 0 ||
+    filtroViaturas.length > 0 ||
+    filtroStatusContas.length > 0
 
   function limparFiltros() {
     setBuscaTexto('')
-    setFiltroCargo('TODOS')
-    setFiltroBase('TODAS')
-    setFiltroMunicipio('TODOS')
-    setFiltroFuncao('TODAS')
-    setFiltroViatura('TODAS')
-    setFiltroStatusConta('TODOS')
+    setFiltroCargos([])
+    setFiltroBases([])
+    setFiltroMunicipios([])
+    setFiltroFuncoes([])
+    setFiltroViaturas([])
+    setFiltroStatusContas([])
   }
 
   const perfisFiltrados = useMemo(() => {
@@ -180,6 +234,10 @@ export default function PainelGestor({ perfilLogado }) {
     const termoDigitos = termo.replace(/\D/g, '')
 
     return perfis.filter((u) => {
+      if (!isMaster && instituicaoLogadaId && u.instituicao_id !== instituicaoLogadaId && u.id !== perfilLogado?.id) {
+        return false
+      }
+
       const nome = (u.nome_completo || '').toUpperCase()
       const matricula = (u.matricula || '').toUpperCase()
       const cpf = (u.cpf || '').replace(/\D/g, '')
@@ -205,27 +263,21 @@ export default function PainelGestor({ perfilLogado }) {
         if (!matchTexto && !matchCpf) return false
       }
 
-      if (filtroCargo !== 'TODOS' && cargo !== filtroCargo) return false
-      if (filtroBase !== 'TODAS' && base !== filtroBase) return false
-      if (filtroMunicipio !== 'TODOS' && municipio !== filtroMunicipio) return false
+      if (filtroCargos.length > 0 && !filtroCargos.includes(cargo)) return false
+      if (filtroBases.length > 0 && !filtroBases.includes(base)) return false
+      if (filtroMunicipios.length > 0 && !filtroMunicipios.includes(municipio)) return false
 
-      if (filtroFuncao !== 'TODAS') {
-        if (filtroFuncao === 'SEM FUNÇÃO') {
-          if (funcao) return false
-        } else if (funcao !== filtroFuncao) {
-          return false
-        }
+      if (filtroFuncoes.length > 0) {
+        const valorFuncao = funcao || 'SEM FUNÇÃO'
+        if (!filtroFuncoes.includes(valorFuncao)) return false
       }
 
-      if (filtroViatura !== 'TODAS') {
-        if (filtroViatura === 'SEM VIATURA') {
-          if (prefixoVtr) return false
-        } else if (prefixoVtr !== filtroViatura) {
-          return false
-        }
+      if (filtroViaturas.length > 0) {
+        const valorViatura = prefixoVtr || 'SEM VIATURA'
+        if (!filtroViaturas.includes(valorViatura)) return false
       }
 
-      if (filtroStatusConta !== 'TODOS' && statusConta !== filtroStatusConta) {
+      if (filtroStatusContas.length > 0 && !filtroStatusContas.includes(statusConta)) {
         return false
       }
 
@@ -233,22 +285,34 @@ export default function PainelGestor({ perfilLogado }) {
     })
   }, [
     perfis,
+    isMaster,
+    instituicaoLogadaId,
+    perfilLogado?.id,
     buscaTexto,
-    filtroCargo,
-    filtroBase,
-    filtroMunicipio,
-    filtroFuncao,
-    filtroViatura,
-    filtroStatusConta,
+    filtroCargos,
+    filtroBases,
+    filtroMunicipios,
+    filtroFuncoes,
+    filtroViaturas,
+    filtroStatusContas,
     mapaPrefixoPorId,
   ])
 
   function alternarCard(u) {
     if (expandidoId === u.id) {
       setExpandidoId(null)
+      setResetSenhaUsuarioId(null)
+      setNovaSenhaReset('')
+      setErroResetSenha('')
+      setSucessoResetSenha('')
       return
     }
     setExpandidoId(u.id)
+    setResetSenhaUsuarioId(null)
+    setNovaSenhaReset('')
+    setMostrarSenhaReset(false)
+    setErroResetSenha('')
+    setSucessoResetSenha('')
     setFormEdit({
       nome_completo: (u.nome_completo || '').toUpperCase(),
       cpf: u.cpf || '',
@@ -258,9 +322,64 @@ export default function PainelGestor({ perfilLogado }) {
       funcao_vtr: (u.funcao_vtr || '').toUpperCase(),
       base: (u.base || '').toUpperCase(),
       municipio_lotacao: (u.municipio_lotacao || '').toUpperCase(),
+      instituicao_id: u.instituicao_id || instituicaoLogadaId || '',
       viatura_atual_id: u.viatura_atual_id || '',
       ativo: u.ativo === false ? 'INATIVO' : 'ATIVO',
     })
+  }
+
+  function abrirPainelResetSenha(usuario) {
+    if (!podeResetarSenhaAlvo(usuario)) return
+    if (resetSenhaUsuarioId === usuario.id) {
+      setResetSenhaUsuarioId(null)
+      setNovaSenhaReset('')
+      setErroResetSenha('')
+      setSucessoResetSenha('')
+      return
+    }
+    setResetSenhaUsuarioId(usuario.id)
+    setNovaSenhaReset('')
+    setMostrarSenhaReset(false)
+    setErroResetSenha('')
+    setSucessoResetSenha('')
+  }
+
+  async function handleConfirmarResetSenha(usuario) {
+    if (!podeResetarSenhaAlvo(usuario)) return
+    setErroResetSenha('')
+    setSucessoResetSenha('')
+
+    const senhaDigitada = novaSenhaReset
+    if (senhaDigitada.length < 6) {
+      setErroResetSenha('A nova senha deve ter no mínimo 6 caracteres.')
+      return
+    }
+
+    setResetandoSenha(true)
+    const { error } = await supabase.rpc('resetar_senha_usuario', {
+      p_usuario_id: usuario.id,
+      p_nova_senha: senhaDigitada,
+    })
+
+    if (error) {
+      setErroResetSenha(`Erro ao resetar senha: ${error.message}`)
+    } else {
+      const nomeAlvo = (usuario.nome_completo || 'USUÁRIO').toUpperCase()
+      await registrarAuditoria({
+        perfil: perfilLogado,
+        tabela: 'perfis',
+        registroId: usuario.id,
+        acao: 'EDICAO',
+        campo: 'RESET_SENHA_USUARIO',
+        valorNovo: `Senha redefinida para ${nomeAlvo} (${(usuario.cargo || '').toUpperCase()})`,
+      })
+      setSucessoResetSenha(
+        `Senha de ${nomeAlvo} redefinida com sucesso. Nova senha definida: ${senhaDigitada}`
+      )
+      setNovaSenhaReset('')
+    }
+
+    setResetandoSenha(false)
   }
 
   async function handleCriarUsuario(e) {
@@ -271,6 +390,15 @@ export default function PainelGestor({ perfilLogado }) {
     const matriculaLimpa = formNovo.matricula.trim().toUpperCase()
     if (!matriculaLimpa) {
       setErroNovo('Informe a matrícula ou registro do integrante.')
+      return
+    }
+
+    const instituicaoDestinoId = isMaster
+      ? formNovo.instituicao_id || instituicaoLogadaId || null
+      : instituicaoLogadaId || null
+
+    if (!isMaster && !instituicaoDestinoId) {
+      setErroNovo('Seu usuário não está vinculado a uma instituição.')
       return
     }
 
@@ -304,6 +432,13 @@ export default function PainelGestor({ perfilLogado }) {
     if (rpcError || !novoId) {
       setErroNovo(`Erro ao criar conta: ${rpcError?.message || 'Verifique os dados.'}`)
     } else {
+      if (instituicaoDestinoId) {
+        await supabase
+          .from('perfis')
+          .update({ instituicao_id: instituicaoDestinoId })
+          .eq('id', novoId)
+      }
+
       await registrarAuditoria({
         perfil: perfilLogado,
         tabela: 'perfis',
@@ -315,7 +450,10 @@ export default function PainelGestor({ perfilLogado }) {
       setSucessoNovo(
         `Usuário ${nomeUpper} criado. 1º login com Nome, CPF ou Matrícula e senha "${senhaInicial}".`
       )
-      setFormNovo(FORM_NOVO_INICIAL)
+      setFormNovo({
+        ...FORM_NOVO_INICIAL,
+        instituicao_id: instituicaoLogadaId,
+      })
       buscarDados()
     }
 
@@ -324,6 +462,10 @@ export default function PainelGestor({ perfilLogado }) {
 
   async function handleSalvarEdicao(usuario) {
     setSalvandoEdicao(true)
+
+    const instituicaoFinalId = isMaster
+      ? formEdit.instituicao_id || usuario.instituicao_id || null
+      : instituicaoLogadaId || usuario.instituicao_id || null
 
     const payload = {
       nome_completo: (formEdit.nome_completo || '').trim().toUpperCase(),
@@ -334,6 +476,7 @@ export default function PainelGestor({ perfilLogado }) {
       funcao_vtr: (formEdit.funcao_vtr || '').trim().toUpperCase() || null,
       base: (formEdit.base || '').trim().toUpperCase(),
       municipio_lotacao: (formEdit.municipio_lotacao || '').trim().toUpperCase(),
+      instituicao_id: instituicaoFinalId,
       viatura_atual_id: formEdit.viatura_atual_id || null,
       ativo: formEdit.ativo !== 'INATIVO',
     }
@@ -361,6 +504,7 @@ export default function PainelGestor({ perfilLogado }) {
           'funcao_vtr',
           'base',
           'municipio_lotacao',
+          'instituicao_id',
           'viatura_atual_id',
           'ativo',
         ],
@@ -533,12 +677,34 @@ export default function PainelGestor({ perfilLogado }) {
                 required
               />
 
+              {isMaster && (
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
+                    Instituição
+                  </label>
+                  <select
+                    value={formNovo.instituicao_id}
+                    onChange={(e) =>
+                      setFormNovo({ ...formNovo, instituicao_id: e.target.value })
+                    }
+                    className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
+                  >
+                    <option value="">SELECIONE A INSTITUIÇÃO</option>
+                    {instituicoes.map((inst) => (
+                      <option key={inst.id} value={inst.id}>
+                        {(inst.sigla ? `${inst.sigla} - ` : '') + inst.nome}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <SelectPesquisavel
                 label="Viatura Atual (Opcional)"
                 opcoes={opcoesViaturas}
                 valor={prefixoVtrNovo}
                 onChange={(prefixo) => {
-                  const v = viaturas.find((i) => i.prefixo.toUpperCase() === prefixo)
+                  const v = viaturasEscopo.find((i) => i.prefixo.toUpperCase() === prefixo)
                   setFormNovo({ ...formNovo, viatura_atual_id: v ? v.id : '' })
                 }}
               />
@@ -616,52 +782,52 @@ export default function PainelGestor({ perfilLogado }) {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2.5">
-            <SelectPesquisavel
+            <FiltroMultiSelecao
               label="Cargo"
-              opcoes={['TODOS', ...TODOS_CARGOS]}
-              valor={filtroCargo}
-              onChange={setFiltroCargo}
-              placeholder="TODOS"
+              opcoes={TODOS_CARGOS}
+              valores={filtroCargos}
+              onChange={setFiltroCargos}
+              placeholderVazio="TODOS"
             />
 
-            <SelectPesquisavel
+            <FiltroMultiSelecao
               label="Base"
-              opcoes={['TODAS', ...opcoesBases]}
-              valor={filtroBase}
-              onChange={setFiltroBase}
-              placeholder="TODAS"
+              opcoes={opcoesBases}
+              valores={filtroBases}
+              onChange={setFiltroBases}
+              placeholderVazio="TODAS"
             />
 
-            <SelectPesquisavel
+            <FiltroMultiSelecao
               label="Município"
               opcoes={opcoesMunicipiosFiltro}
-              valor={filtroMunicipio}
-              onChange={setFiltroMunicipio}
-              placeholder="TODOS"
+              valores={filtroMunicipios}
+              onChange={setFiltroMunicipios}
+              placeholderVazio="TODOS"
             />
 
-            <SelectPesquisavel
+            <FiltroMultiSelecao
               label="Função na VTR"
               opcoes={opcoesFuncoesFiltro}
-              valor={filtroFuncao}
-              onChange={setFiltroFuncao}
-              placeholder="TODAS"
+              valores={filtroFuncoes}
+              onChange={setFiltroFuncoes}
+              placeholderVazio="TODAS"
             />
 
-            <SelectPesquisavel
+            <FiltroMultiSelecao
               label="Viatura Atual"
               opcoes={opcoesViaturasFiltro}
-              valor={filtroViatura}
-              onChange={setFiltroViatura}
-              placeholder="TODAS"
+              valores={filtroViaturas}
+              onChange={setFiltroViaturas}
+              placeholderVazio="TODAS"
             />
 
-            <SelectPesquisavel
+            <FiltroMultiSelecao
               label="Status da Conta"
-              opcoes={['TODOS', ...STATUS_ATIVO]}
-              valor={filtroStatusConta}
-              onChange={setFiltroStatusConta}
-              placeholder="TODOS"
+              opcoes={STATUS_ATIVO}
+              valores={filtroStatusContas}
+              onChange={setFiltroStatusContas}
+              placeholderVazio="TODOS"
             />
           </div>
         </div>
@@ -690,8 +856,10 @@ export default function PainelGestor({ perfilLogado }) {
               const aberto = expandidoId === u.id
               const cargoAlvo = (u.cargo || 'SEM CARGO').toUpperCase()
               const bloqueadoPorHierarquia = !isGestor && cargoAlvo === 'GESTOR'
+              const permiteResetarSenha = podeResetarSenhaAlvo(u)
+              const painelResetAberto = resetSenhaUsuarioId === u.id
               const prefixoVtrEdit =
-                viaturas.find((v) => v.id === formEdit.viatura_atual_id)?.prefixo?.toUpperCase() || ''
+                viaturasEscopo.find((v) => v.id === formEdit.viatura_atual_id)?.prefixo?.toUpperCase() || ''
               const prefixoVtrCard = u.viatura_atual_id
                 ? mapaPrefixoPorId.get(u.viatura_atual_id) || ''
                 : ''
@@ -840,13 +1008,36 @@ export default function PainelGestor({ perfilLogado }) {
                           onChange={(val) => setFormEdit({ ...formEdit, municipio_lotacao: val })}
                         />
 
+                        {isMaster && (
+                          <div>
+                            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
+                              Instituição
+                            </label>
+                            <select
+                              disabled={bloqueadoPorHierarquia}
+                              value={formEdit.instituicao_id || ''}
+                              onChange={(e) =>
+                                setFormEdit({ ...formEdit, instituicao_id: e.target.value })
+                              }
+                              className="w-full bg-qth-card border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60 focus:outline-none focus:border-qth-orange"
+                            >
+                              <option value="">SEM INSTITUIÇÃO</option>
+                              {instituicoes.map((inst) => (
+                                <option key={inst.id} value={inst.id}>
+                                  {(inst.sigla ? `${inst.sigla} - ` : '') + inst.nome}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+
                         <SelectPesquisavel
                           label="Viatura Atual"
                           opcoes={opcoesViaturas}
                           valor={prefixoVtrEdit}
                           disabled={bloqueadoPorHierarquia}
                           onChange={(prefixo) => {
-                            const v = viaturas.find((i) => i.prefixo.toUpperCase() === prefixo)
+                            const v = viaturasEscopo.find((i) => i.prefixo.toUpperCase() === prefixo)
                             setFormEdit({ ...formEdit, viatura_atual_id: v ? v.id : '' })
                           }}
                         />
@@ -860,26 +1051,106 @@ export default function PainelGestor({ perfilLogado }) {
                         />
                       </div>
 
-                      {!bloqueadoPorHierarquia && (
-                        <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-                          <button
-                            type="button"
-                            onClick={() => handleExcluirUsuario(u)}
-                            className="bg-qth-red/20 hover:bg-qth-red text-red-300 hover:text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            EXCLUIR
-                          </button>
+                      {painelResetAberto && permiteResetarSenha && (
+                        <div className="bg-qth-card border border-qth-orange/60 rounded-xl p-3 space-y-2.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-extrabold text-qth-orange uppercase flex items-center gap-1.5">
+                              <KeyRound className="w-3.5 h-3.5" />
+                              Redefinir Senha de {(u.nome_completo || 'USUÁRIO').toUpperCase()}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => abrirPainelResetSenha(u)}
+                              className="text-slate-400 hover:text-white cursor-pointer"
+                              title="Fechar redefinição de senha"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
 
-                          <button
-                            type="button"
-                            disabled={salvandoEdicao}
-                            onClick={() => handleSalvarEdicao(u)}
-                            className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
-                          >
-                            <Save className="w-3.5 h-3.5" />
-                            {salvandoEdicao ? 'SALVANDO...' : 'SALVAR ALTERAÇÕES'}
-                          </button>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="relative flex-1 min-w-[220px]">
+                              <input
+                                type={mostrarSenhaReset ? 'text' : 'password'}
+                                value={novaSenhaReset}
+                                onChange={(e) => setNovaSenhaReset(e.target.value)}
+                                placeholder="DIGITE A NOVA SENHA (MÍN. 6 CARACTERES)"
+                                className="w-full bg-qth-bg border border-slate-600 rounded-lg pl-3 pr-9 py-2 text-xs font-semibold text-white placeholder-slate-500 focus:outline-none focus:border-qth-orange"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => setMostrarSenhaReset((prev) => !prev)}
+                                className="text-slate-400 hover:text-white absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer"
+                                title={mostrarSenhaReset ? 'Ocultar senha' : 'Mostrar senha'}
+                              >
+                                {mostrarSenhaReset ? (
+                                  <EyeOff className="w-3.5 h-3.5" />
+                                ) : (
+                                  <Eye className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            </div>
+
+                            <button
+                              type="button"
+                              disabled={resetandoSenha || novaSenhaReset.length < 6}
+                              onClick={() => handleConfirmarResetSenha(u)}
+                              className="bg-qth-orange hover:bg-orange-600 disabled:opacity-50 text-white font-bold px-3.5 py-2 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              {resetandoSenha ? 'REDEFININDO...' : 'CONFIRMAR NOVA SENHA'}
+                            </button>
+                          </div>
+
+                          {erroResetSenha && (
+                            <p className="text-xs text-red-400 bg-qth-red/15 border border-qth-red/40 p-2 rounded-lg">
+                              {erroResetSenha}
+                            </p>
+                          )}
+
+                          {sucessoResetSenha && (
+                            <p className="text-xs text-green-400 bg-qth-green/15 border border-qth-green/40 p-2 rounded-lg font-semibold">
+                              {sucessoResetSenha}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {(!bloqueadoPorHierarquia || permiteResetarSenha) && (
+                        <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                          {permiteResetarSenha && (
+                            <button
+                              type="button"
+                              onClick={() => abrirPainelResetSenha(u)}
+                              className="bg-qth-orange/20 hover:bg-qth-orange text-orange-300 hover:text-white border border-qth-orange/40 font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              RESETAR SENHA
+                            </button>
+                          )}
+
+                          {!bloqueadoPorHierarquia && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleExcluirUsuario(u)}
+                                className="bg-qth-red/20 hover:bg-qth-red text-red-300 hover:text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                EXCLUIR
+                              </button>
+
+                              <button
+                                type="button"
+                                disabled={salvandoEdicao}
+                                onClick={() => handleSalvarEdicao(u)}
+                                className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                              >
+                                <Save className="w-3.5 h-3.5" />
+                                {salvandoEdicao ? 'SALVANDO...' : 'SALVAR ALTERAÇÕES'}
+                              </button>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>

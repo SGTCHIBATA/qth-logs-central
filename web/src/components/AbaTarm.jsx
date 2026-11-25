@@ -266,7 +266,7 @@ export default function AbaTarm({
                             <SelectPesquisavel
                                 label="UF"
                                 opcoes={listaEstados}
-                                valor={editTarm.estado || 'PR'}
+                                valor={editTarm.estado || ''}
                                 disabled={!podeCriarOuEditarTarm}
                                 onChange={(uf) =>
                                     setEditTarm({ ...editTarm, estado: uf, cidade_urb: '' })
@@ -337,7 +337,7 @@ export default function AbaTarm({
                             <SelectPesquisavel
                                 label="UF Rodovia"
                                 opcoes={listaEstados}
-                                valor={editTarm.rodovia_uf || 'PR'}
+                                valor={editTarm.rodovia_uf || ''}
                                 disabled={!podeCriarOuEditarTarm}
                                 onChange={(uf) =>
                                     setEditTarm({
@@ -428,7 +428,7 @@ export default function AbaTarm({
                         <SelectPesquisavel
                             label="UF"
                             opcoes={listaEstados}
-                            valor={editTarm.origem_uf || 'PR'}
+                            valor={editTarm.origem_uf || ''}
                             disabled={!podeCriarOuEditarTarm}
                             onChange={(uf) =>
                                 setEditTarm({

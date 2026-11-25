@@ -258,6 +258,44 @@ export function inferirStatusPorHorario(chaveHorario, valorHorario, statusAtual 
   return mapa[chaveHorario] || statusAtual || 'ACIONADA'
 }
 
+export function podeRemanejarStatusEmpenho(statusRaw) {
+  const st = (statusRaw || '').toUpperCase().trim()
+  return ['ACIONADA', 'EMPENHADA', 'QTI', 'QTI BASE QAP', 'DISPONIVEL'].includes(st)
+}
+
+export function isStatusEmpenhoEncerradoOuBaixado(statusRaw, statusViaturaRaw = '') {
+  const stEmp = (statusRaw || '').toUpperCase().trim()
+  const stVtr = (statusViaturaRaw || '').toUpperCase().trim()
+  return (
+    ['FINALIZADA', 'ENCERRADA'].includes(stEmp) ||
+    ['BAIXADA', 'BAIXADO', 'INATIVA', 'INDISPONIVEL_BAIXA'].includes(stVtr)
+  )
+}
+
+export function resolverEndpointRoteamento(configInstituicao) {
+  const url = (
+    configInstituicao?.routing_url ||
+    configInstituicao?.routing_endpoint_url ||
+    configInstituicao?.url ||
+    ''
+  ).trim()
+  const modo = (configInstituicao?.routing_mode || configInstituicao?.modo || 'OSRM_DEFAULT')
+    .toUpperCase()
+    .trim()
+  const ativo =
+    configInstituicao?.ativa !== false &&
+    Boolean(configInstituicao?.routing_enabled ?? configInstituicao?.ativo) &&
+    ['INSTITUTION_URL', 'CENTRAL_SERVER'].includes(modo) &&
+    Boolean(url)
+
+  return {
+    ativo,
+    modo: ativo ? modo : 'OSRM_DEFAULT',
+    url: ativo ? url.replace(/\/+$/, '') : null,
+    timeoutMs: Math.max(500, parseInt(configInstituicao?.routing_timeout_ms ?? configInstituicao?.timeout_ms, 10) || 3000),
+  }
+}
+
 // Ordem decrescente: 0 = Disponíveis, 1 = Empenhados e afins, 2 = Baixados e afins
 export function obterGrupoDisponibilidadeVtr(statusRaw) {
   const st = (statusRaw || 'DISPONIVEL').toUpperCase().trim()
@@ -471,7 +509,7 @@ export function formatarEnderecoOcorrencia(oc) {
       oc.destino_instituicao,
       oc.destino_rua && `${oc.destino_rua}${oc.destino_numero ? `, ${oc.destino_numero}` : ''}`,
       oc.destino_bairro,
-      oc.destino_cidade && `${oc.destino_cidade} - ${oc.origem_uf || 'PR'}`,
+      oc.destino_cidade && `${oc.destino_cidade} - ${oc.destino_uf || 'PR'}`,
     ]
       .filter(Boolean)
       .join(', ')

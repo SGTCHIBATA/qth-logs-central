@@ -1,7 +1,7 @@
-import { useEffect, useState, useMemo, useRef } from 'react'
+import { useEffect, useState, useMemo, useRef, lazy, Suspense } from 'react'
 import { supabase } from '../lib/supabase'
 import { registrarAuditoria, registrarAlteracoesEmLote } from '../lib/auditoria'
-import SelectPesquisavel from './SelectPesquisavel'
+import FiltroMultiSelecao from './FiltroMultiSelecao'
 import FormNovaOcorrencia from './FormNovaOcorrencia'
 import ModalOcorrencia from './ModalOcorrencia'
 import cidadesData from '../data/cidades.json'
@@ -27,6 +27,8 @@ import {
     executarAlterarHorarioEStatusVtr,
     executarSalvarHorariosVtr,
     executarDesvincularEmpenho,
+    executarSolicitarRemanejamento,
+    executarCancelarRemanejamento,
     executarSalvarRadio,
     executarAlterarCorVtr,
     renderizarPainelBalancoVitimas,
@@ -41,10 +43,15 @@ import {
     Users,
     Trash2,
     Navigation,
+    Building2,
 } from 'lucide-react'
+
+const AbaPlantoesTripulacoes = lazy(() => import('./AbaPlantoesTripulacoes'))
 
 
 export default function PainelCentral({ perfil }) {
+    const isMaster = Boolean(perfil?.is_platform_owner)
+    const instituicaoId = perfil?.instituicao_id || null
     const cargo = (perfil?.cargo || '').toUpperCase()
     const userKey = perfil?.id || 'anonimo'
     const chaveRascunhoNova = `qth_rascunho_nova_oc_${userKey}`
@@ -80,10 +87,16 @@ export default function PainelCentral({ perfil }) {
         'GESTOR',
     ].includes(cargo)
 
+    const podeGerenciarPlantoes =
+        isMaster || ['RADIO OPERADOR', 'COORDENADOR', 'GESTOR'].includes(cargo)
+
     const [ocorrencias, setOcorrencias] = useState([])
     const [empenhos, setEmpenhos] = useState([])
     const [evolucoes, setEvolucoes] = useState([])
     const [viaturas, setViaturas] = useState([])
+    const [remanejamentos, setRemanejamentos] = useState([])
+    const [plantoesAtivos, setPlantoesAtivos] = useState([])
+    const [instituicoes, setInstituicoes] = useState([])
     const [carregando, setCarregando] = useState(true)
 
     const [rascunhosVtr, setRascunhosVtr] = useState({})
@@ -104,6 +117,7 @@ export default function PainelCentral({ perfil }) {
     })
 
     const [subAbaStatus, setSubAbaStatus] = useState('RESUMO_GERAL')
+    const [chipsStatusGeral, setChipsStatusGeral] = useState([])
 
     const rascunhoSalvo = useMemo(() => {
         try {
@@ -140,11 +154,12 @@ export default function PainelCentral({ perfil }) {
     }, [mostrarFormNova, formNova, chaveRascunhoNova])
 
     const [buscaTexto, setBuscaTexto] = useState('')
-    const [filtroPrioridade, setFiltroPrioridade] = useState('TODAS')
-    const [filtroNatureza, setFiltroNatureza] = useState('TODAS')
-    const [filtroMunicipio, setFiltroMunicipio] = useState('TODOS')
-    const [filtroViatura, setFiltroViatura] = useState('TODAS')
-    const [filtroImv, setFiltroImv] = useState('TODAS')
+    const [filtroInstituicoes, setFiltroInstituicoes] = useState([])
+    const [filtroPrioridades, setFiltroPrioridades] = useState([])
+    const [filtroNaturezas, setFiltroNaturezas] = useState([])
+    const [filtroMunicipios, setFiltroMunicipios] = useState([])
+    const [filtroViaturas, setFiltroViaturas] = useState([])
+    const [filtroImv, setFiltroImv] = useState([])
 
     const modalSalvo = useMemo(() => {
         try {
@@ -186,6 +201,25 @@ export default function PainelCentral({ perfil }) {
 
     const idInicializadoRef = useRef(null)
 
+    const mapaInstituicoes = useMemo(() => {
+        const mapa = {}
+        for (const inst of instituicoes) {
+            if (inst?.id) {
+                mapa[inst.id] = (inst.sigla || inst.nome || '').toUpperCase()
+            }
+        }
+        return mapa
+    }, [instituicoes])
+
+    const opcoesInstituicoesFiltro = useMemo(() => {
+        return instituicoes
+            .map((inst) => ({
+                value: inst.id,
+                label: (inst.sigla ? `${inst.sigla} - ${inst.nome}` : inst.nome || '').toUpperCase(),
+            }))
+            .sort((a, b) => a.label.localeCompare(b.label, 'pt-BR'))
+    }, [instituicoes])
+
     const listaEstados = useMemo(
         () => (cidadesData?.estados || []).map((e) => e.sigla.toUpperCase()).sort(),
         []
@@ -224,16 +258,46 @@ export default function PainelCentral({ perfil }) {
             .on('postgres_changes', { event: '*', schema: 'public', table: 'viaturas' }, () =>
                 carregarTudo({ silencioso: true })
             )
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'viatura_remanejamentos' }, () =>
+                carregarTudo({ silencioso: true })
+            )
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'viatura_plantoes' }, () =>
+                carregarTudo({ silencioso: true })
+            )
             .subscribe()
 
         return () => {
             supabase.removeChannel(canal)
         }
-    }, [])
+    }, [isMaster, instituicaoId])
 
     async function carregarTudo({ silencioso = false } = {}) {
         if (!silencioso && ocorrencias.length === 0) {
             setCarregando(true)
+        }
+
+        let queryOc = supabase.from('ocorrencias').select('*').order('criado_em', { ascending: false })
+        let queryEmp = supabase.from('ocorrencia_viaturas').select('*').order('criado_em', { ascending: true })
+        let queryVtr = supabase
+            .from('viaturas')
+            .select('id, prefixo, tipo, cidade, base_cidade, estado, status, km_atual, instituicao_id')
+            .order('prefixo', { ascending: true })
+        let queryRem = supabase
+            .from('viatura_remanejamentos')
+            .select('*')
+            .eq('status', 'PENDENTE_ACEITE')
+            .order('solicitado_em', { ascending: false })
+        let queryPl = supabase
+            .from('viatura_plantoes')
+            .select('*')
+            .eq('status', 'ATIVO')
+
+        if (!isMaster && instituicaoId) {
+            queryOc = queryOc.eq('instituicao_id', instituicaoId)
+            queryEmp = queryEmp.eq('instituicao_id', instituicaoId)
+            queryVtr = queryVtr.eq('instituicao_id', instituicaoId)
+            queryRem = queryRem.eq('instituicao_id', instituicaoId)
+            queryPl = queryPl.eq('instituicao_id', instituicaoId)
         }
 
         const [
@@ -241,14 +305,19 @@ export default function PainelCentral({ perfil }) {
             { data: dataEmp },
             { data: dataEvo },
             { data: dataVtr },
+            { data: dataRem },
+            { data: dataPl },
+            { data: dataInst },
         ] = await Promise.all([
-            supabase.from('ocorrencias').select('*').order('criado_em', { ascending: false }),
-            supabase.from('ocorrencia_viaturas').select('*').order('criado_em', { ascending: true }),
+            queryOc,
+            queryEmp,
             supabase.from('ocorrencia_evolucoes').select('*').order('criado_em', { ascending: false }),
-            supabase
-                .from('viaturas')
-                .select('id, prefixo, tipo, cidade, base_cidade, estado, status, km_atual')
-                .order('prefixo', { ascending: true }),
+            queryVtr,
+            queryRem,
+            queryPl,
+            isMaster
+                ? supabase.from('instituicoes').select('id, nome, sigla, ativa').order('nome', { ascending: true })
+                : Promise.resolve({ data: [] }),
         ])
 
         if (dataOc) setOcorrencias(dataOc)
@@ -292,6 +361,9 @@ export default function PainelCentral({ perfil }) {
         }
         if (dataEvo) setEvolucoes(dataEvo)
         if (dataVtr) setViaturas(dataVtr)
+        if (dataRem) setRemanejamentos(dataRem)
+        if (dataPl) setPlantoesAtivos(dataPl)
+        if (dataInst) setInstituicoes(dataInst)
         setCarregando(false)
     }
 
@@ -489,7 +561,10 @@ export default function PainelCentral({ perfil }) {
             numero_vitimas: Math.max(1, parseInt(oc.numero_vitimas, 10) || 1),
             vitimas_meios_proprios: Math.max(0, parseInt(oc.vitimas_meios_proprios, 10) || 0),
             vitimas_terceiros: Math.max(0, parseInt(oc.vitimas_terceiros, 10) || 0),
-            vitimas_obito_local: Math.max(0, parseInt(oc.vitimas_obito_local, 10) || 0),
+            vitimas_obito_local: Math.max(
+                0,
+                parseInt(oc.vitimas_obito_local, 10) || 0
+            ),
             classificacao_risco: oc.classificacao_risco || '',
             hipotese_diagnostica: oc.hipotese_diagnostica || '',
             quadro_clinico: oc.quadro_clinico || '',
@@ -644,7 +719,7 @@ export default function PainelCentral({ perfil }) {
             const c = obterCidadePrincipal(oc)
             if (c) setMun.add(c)
         }
-        return ['TODOS', ...Array.from(setMun).sort()]
+        return Array.from(setMun).sort()
     }, [ocorrencias])
 
     const opcoesViaturasFiltro = useMemo(() => {
@@ -655,53 +730,92 @@ export default function PainelCentral({ perfil }) {
         for (const e of empenhos) {
             if (e.prefixo) setVtr.add(e.prefixo.toUpperCase())
         }
-        return ['TODAS', ...Array.from(setVtr).sort()]
+        return Array.from(setVtr).sort()
     }, [viaturas, empenhos])
+
+    function alternarChipStatusGeral(statusId) {
+        if (statusId === 'TODOS') {
+            setChipsStatusGeral([])
+            return
+        }
+        setChipsStatusGeral((prev) =>
+            prev.includes(statusId)
+                ? prev.filter((item) => item !== statusId)
+                : [...prev, statusId]
+        )
+    }
 
     const temFiltroAtivo =
         buscaTexto.trim() !== '' ||
-        filtroPrioridade !== 'TODAS' ||
-        filtroNatureza !== 'TODAS' ||
-        filtroMunicipio !== 'TODOS' ||
-        filtroViatura !== 'TODAS' ||
-        filtroImv !== 'TODAS'
+        (subAbaStatus === 'RESUMO_GERAL' && chipsStatusGeral.length > 0) ||
+        filtroInstituicoes.length > 0 ||
+        filtroPrioridades.length > 0 ||
+        filtroNaturezas.length > 0 ||
+        filtroMunicipios.length > 0 ||
+        filtroViaturas.length > 0 ||
+        filtroImv.length > 0
 
     function limparFiltros() {
         setBuscaTexto('')
-        setFiltroPrioridade('TODAS')
-        setFiltroNatureza('TODAS')
-        setFiltroMunicipio('TODOS')
-        setFiltroViatura('TODAS')
-        setFiltroImv('TODAS')
+        setChipsStatusGeral([])
+        setFiltroInstituicoes([])
+        setFiltroPrioridades([])
+        setFiltroNaturezas([])
+        setFiltroMunicipios([])
+        setFiltroViaturas([])
+        setFiltroImv([])
     }
 
     const ocorrenciasFiltradas = useMemo(() => {
         const termo = buscaTexto.trim().toUpperCase()
 
         return ocorrencias.filter((oc) => {
+            if (isMaster && filtroInstituicoes.length > 0) {
+                if (!oc.instituicao_id || !filtroInstituicoes.includes(oc.instituicao_id)) {
+                    return false
+                }
+            }
+
             const st = (oc.status_ocorrencia || 'PENDENTE').toUpperCase()
             if (subAbaStatus !== 'RESUMO_GERAL' && st !== subAbaStatus) return false
+            if (
+                subAbaStatus === 'RESUMO_GERAL' &&
+                chipsStatusGeral.length > 0 &&
+                !chipsStatusGeral.includes(st)
+            ) {
+                return false
+            }
 
             const prio = (oc.prioridade || 'MEDIA').toUpperCase()
-            if (filtroPrioridade !== 'TODAS' && prio !== filtroPrioridade) return false
+            if (filtroPrioridades.length > 0 && !filtroPrioridades.includes(prio)) return false
 
             const nat = (oc.tipo_atendimento || 'PRIMÁRIO').toUpperCase()
-            if (filtroNatureza !== 'TODAS' && nat !== filtroNatureza) return false
+            if (filtroNaturezas.length > 0 && !filtroNaturezas.includes(nat)) return false
 
             const cidadeOc = obterCidadePrincipal(oc)
-            if (filtroMunicipio !== 'TODOS' && cidadeOc !== filtroMunicipio) return false
+            if (filtroMunicipios.length > 0 && !filtroMunicipios.includes(cidadeOc)) return false
 
             const qtdVit = Math.max(1, parseInt(oc.numero_vitimas, 10) || 1)
-            if (filtroImv === 'IMV_ATIVO' && !oc.protocolo_imv) return false
-            if (filtroImv === 'MULTIPLAS_VITIMAS' && qtdVit < 2) return false
+            if (filtroImv.length > 0) {
+                const bateImv =
+                    (filtroImv.includes('IMV_ATIVO') && Boolean(oc.protocolo_imv)) ||
+                    (filtroImv.includes('MULTIPLAS_VITIMAS') && qtdVit >= 2)
+                if (!bateImv) return false
+            }
 
             const vtrsOc = (empenhosPorOcorrencia.get(oc.id) || []).map((e) =>
                 (e.prefixo || '').toUpperCase()
             )
-            if (filtroViatura !== 'TODAS' && !vtrsOc.includes(filtroViatura)) return false
+            if (
+                filtroViaturas.length > 0 &&
+                !filtroViaturas.some((vtrFiltro) => vtrsOc.includes(vtrFiltro))
+            ) {
+                return false
+            }
 
             if (termo) {
                 const enderecoFmt = formatarEnderecoOcorrencia(oc).toUpperCase()
+                const nomeInst = (mapaInstituicoes[oc.instituicao_id] || '').toUpperCase()
                 const match =
                     (oc.numero_ocorrencia || '').toUpperCase().includes(termo) ||
                     (oc.solicitante_nome || '').toUpperCase().includes(termo) ||
@@ -712,6 +826,7 @@ export default function PainelCentral({ perfil }) {
                     (oc.codigo_j || '').toUpperCase().includes(termo) ||
                     (oc.codigo_qta || '').toUpperCase().includes(termo) ||
                     (oc.coordenadas || '').toUpperCase().includes(termo) ||
+                    nomeInst.includes(termo) ||
                     enderecoFmt.includes(termo) ||
                     vtrsOc.some((p) => p.includes(termo))
 
@@ -722,18 +837,27 @@ export default function PainelCentral({ perfil }) {
         })
     }, [
         ocorrencias,
+        isMaster,
+        filtroInstituicoes,
+        mapaInstituicoes,
         subAbaStatus,
-        filtroPrioridade,
-        filtroNatureza,
-        filtroMunicipio,
-        filtroViatura,
+        chipsStatusGeral,
+        filtroPrioridades,
+        filtroNaturezas,
+        filtroMunicipios,
+        filtroViaturas,
         filtroImv,
         buscaTexto,
         empenhosPorOcorrencia,
     ])
 
     const recursosOrdenadosMiniPainel = useMemo(() => {
-        return [...viaturas]
+        const base =
+            isMaster && filtroInstituicoes.length > 0
+                ? viaturas.filter((v) => v.instituicao_id && filtroInstituicoes.includes(v.instituicao_id))
+                : viaturas
+
+        return [...base]
             .map((v) => {
                 const prefixoUpper = (v.prefixo || '').toUpperCase().trim()
                 const statusUpper = (v.status || 'DISPONIVEL').toUpperCase().trim()
@@ -743,6 +867,7 @@ export default function PainelCentral({ perfil }) {
                     prefixoUpper,
                     statusUpper,
                     grupo,
+                    instituicaoSigla: mapaInstituicoes[v.instituicao_id] || '',
                     meta: obterEstiloRecursoMiniPainel(statusUpper),
                 }
             })
@@ -750,7 +875,7 @@ export default function PainelCentral({ perfil }) {
                 if (a.grupo !== b.grupo) return a.grupo - b.grupo
                 return a.prefixoUpper.localeCompare(b.prefixoUpper, 'pt-BR')
             })
-    }, [viaturas])
+    }, [viaturas, isMaster, filtroInstituicoes, mapaInstituicoes])
 
     function horaAtualHhMm() {
         const agora = new Date()
@@ -792,6 +917,7 @@ export default function PainelCentral({ perfil }) {
         const vitimasQtd = Math.max(1, parseInt(formNova.numero_vitimas, 10) || 1)
 
         const payload = {
+            instituicao_id: instituicaoId,
             numero_ocorrencia: numeroLimpo,
             status_ocorrencia: 'PENDENTE',
             prioridade: formNova.prioridade || 'MEDIA',
@@ -813,24 +939,24 @@ export default function PainelCentral({ perfil }) {
             numero_end: formNova.numero_end.trim().toUpperCase(),
             bairro: formNova.bairro.trim().toUpperCase(),
             ponto_referencia: formNova.ponto_referencia.trim().toUpperCase(),
-            estado: (formNova.estado || 'PR').trim().toUpperCase(),
+            estado: (formNova.estado || '').trim().toUpperCase(),
             cidade_urb: formNova.cidade_urb.trim().toUpperCase(),
             rodovia_jurisdicao: formNova.rodovia_jurisdicao.trim().toUpperCase(),
             rodovia_codigo: formNova.rodovia_codigo.trim().toUpperCase(),
             rodovia_km: formNova.rodovia_km.trim(),
-            rodovia_uf: (formNova.rodovia_uf || 'PR').trim().toUpperCase(),
+            rodovia_uf: (formNova.rodovia_uf || '').trim().toUpperCase(),
             rodovia_cidade: formNova.rodovia_cidade.trim().toUpperCase(),
             origem_instituicao: formNova.origem_instituicao.trim().toUpperCase(),
             origem_rua: formNova.origem_rua.trim().toUpperCase(),
             origem_numero: formNova.origem_numero.trim().toUpperCase(),
             origem_bairro: formNova.origem_bairro.trim().toUpperCase(),
-            origem_uf: (formNova.origem_uf || 'PR').trim().toUpperCase(),
+            origem_uf: (formNova.origem_uf || '').trim().toUpperCase(),
             origem_cidade: formNova.origem_cidade.trim().toUpperCase(),
             destino_instituicao: formNova.destino_instituicao.trim().toUpperCase(),
             destino_rua: formNova.destino_rua.trim().toUpperCase(),
             destino_numero: formNova.destino_numero.trim().toUpperCase(),
             destino_bairro: formNova.destino_bairro.trim().toUpperCase(),
-            destino_uf: (formNova.destino_uf || 'PR').trim().toUpperCase(),
+            destino_uf: (formNova.destino_uf || '').trim().toUpperCase(),
             destino_cidade: formNova.destino_cidade.trim().toUpperCase(),
             motivo: formNova.motivo.trim().toUpperCase(),
             criado_por: perfil?.id || null,
@@ -858,6 +984,7 @@ export default function PainelCentral({ perfil }) {
                 // ignora
             }
             setSubAbaStatus('PENDENTE')
+            setChipsStatusGeral([])
             await carregarTudo({ silencioso: true })
         }
 
@@ -919,24 +1046,24 @@ export default function PainelCentral({ perfil }) {
             numero_end: (editTarm.numero_end || '').trim().toUpperCase(),
             bairro: (editTarm.bairro || '').trim().toUpperCase(),
             ponto_referencia: (editTarm.ponto_referencia || '').trim().toUpperCase(),
-            estado: (editTarm.estado || 'PR').trim().toUpperCase(),
+            estado: (editTarm.estado || '').trim().toUpperCase(),
             cidade_urb: (editTarm.cidade_urb || '').trim().toUpperCase(),
             rodovia_jurisdicao: (editTarm.rodovia_jurisdicao || '').trim().toUpperCase(),
             rodovia_codigo: (editTarm.rodovia_codigo || '').trim().toUpperCase(),
             rodovia_km: (editTarm.rodovia_km || '').trim(),
-            rodovia_uf: (editTarm.rodovia_uf || 'PR').trim().toUpperCase(),
+            rodovia_uf: (editTarm.rodovia_uf || '').trim().toUpperCase(),
             rodovia_cidade: (editTarm.rodovia_cidade || '').trim().toUpperCase(),
             origem_instituicao: (editTarm.origem_instituicao || '').trim().toUpperCase(),
             origem_rua: (editTarm.origem_rua || '').trim().toUpperCase(),
             origem_numero: (editTarm.origem_numero || '').trim().toUpperCase(),
             origem_bairro: (editTarm.origem_bairro || '').trim().toUpperCase(),
-            origem_uf: (editTarm.origem_uf || 'PR').trim().toUpperCase(),
+            origem_uf: (editTarm.origem_uf || '').trim().toUpperCase(),
             origem_cidade: (editTarm.origem_cidade || '').trim().toUpperCase(),
             destino_instituicao: (editTarm.destino_instituicao || '').trim().toUpperCase(),
             destino_rua: (editTarm.destino_rua || '').trim().toUpperCase(),
             destino_numero: (editTarm.destino_numero || '').trim().toUpperCase(),
             destino_bairro: (editTarm.destino_bairro || '').trim().toUpperCase(),
-            destino_uf: (editTarm.destino_uf || 'PR').trim().toUpperCase(),
+            destino_uf: (editTarm.destino_uf || '').trim().toUpperCase(),
             destino_cidade: (editTarm.destino_cidade || '').trim().toUpperCase(),
             motivo: (editTarm.motivo || '').trim().toUpperCase(),
             nome_paciente: (editTarm.nome_paciente || '').trim().toUpperCase(),
@@ -1674,12 +1801,39 @@ export default function PainelCentral({ perfil }) {
         })
     }
 
+    async function handleSolicitarRemanejamento(empOrigem, ocorrenciaDestino, solicitacaoDestino = null, motivoCentral = '') {
+        return executarSolicitarRemanejamento({
+            perfil,
+            podeEditarRadio,
+            empOrigem,
+            ocorrenciaDestino,
+            solicitacaoDestino,
+            motivoCentral,
+            setSalvandoSecao,
+            setMensagemModal,
+            carregarTudo,
+        })
+    }
+
+    async function handleCancelarRemanejamento(remanejamentoId, prefixo = '') {
+        return executarCancelarRemanejamento({
+            perfil,
+            podeEditarRadio,
+            remanejamentoId,
+            prefixo,
+            setSalvandoSecao,
+            setMensagemModal,
+            carregarTudo,
+        })
+    }
+
     async function handleSalvarRadio(statusForcado = null) {
         return executarSalvarRadio({
             perfil,
             podeEditarRadio,
             ocorrenciaSelecionada,
             empenhosDaOcorrencia,
+            viaturas,
             editRadio,
             statusForcado,
             setEditRadio,
@@ -1749,7 +1903,7 @@ export default function PainelCentral({ perfil }) {
                     />
                 )}
 
-                {/* Sub-abas por Status + Resumo Geral */}
+                {/* Sub-abas por Status + Resumo Geral + Plantões / Tripulações */}
                 <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-700/70 pb-3">
                     {SUB_ABAS_STATUS.map((aba) => {
                         const ativa = subAbaStatus === aba.id
@@ -1758,7 +1912,12 @@ export default function PainelCentral({ perfil }) {
                             <button
                                 key={aba.id}
                                 type="button"
-                                onClick={() => setSubAbaStatus(aba.id)}
+                                onClick={() => {
+                                    setSubAbaStatus(aba.id)
+                                    if (aba.id !== 'RESUMO_GERAL') {
+                                        setChipsStatusGeral([])
+                                    }
+                                }}
                                 className={`px-3 py-1.5 rounded-lg text-xs font-extrabold uppercase flex items-center gap-1.5 cursor-pointer transition-colors border ${ativa
                                     ? 'bg-qth-orange text-white border-qth-orange'
                                     : 'bg-qth-bg/70 text-slate-300 border-slate-700 hover:border-slate-500'
@@ -1774,230 +1933,342 @@ export default function PainelCentral({ perfil }) {
                             </button>
                         )
                     })}
-                </div>
 
-                {/* Barra de Pesquisa Global e Filtros Inteligentes */}
-                <div className="bg-qth-bg/70 border border-slate-700/80 rounded-xl p-3 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="relative flex-1 min-w-[220px]">
-                            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                            <input
-                                type="text"
-                                value={buscaTexto}
-                                onChange={(e) => setBuscaTexto(e.target.value.toUpperCase())}
-                                placeholder="PESQUISAR Nº OCORRÊNCIA, SOLICITANTE, MOTIVO, ENDEREÇO, COORDENADAS OU VTR..."
-                                className="w-full bg-qth-card border border-slate-600 rounded-lg pl-9 pr-8 py-2 text-xs font-semibold text-white placeholder-slate-500 uppercase focus:outline-none focus:border-qth-orange"
-                            />
-                            {buscaTexto && (
-                                <button
-                                    type="button"
-                                    onClick={() => setBuscaTexto('')}
-                                    className="text-slate-400 hover:text-white absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer"
-                                >
-                                    <X className="w-3.5 h-3.5" />
-                                </button>
-                            )}
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                            <span className="text-[11px] font-bold text-slate-300 bg-qth-card border border-slate-700 px-2.5 py-1.5 rounded-lg">
-                                {ocorrenciasFiltradas.length} RESULTADOS
+                    {podeGerenciarPlantoes && (
+                        <button
+                            type="button"
+                            onClick={() => setSubAbaStatus('PLANTOES_TRIPULACOES')}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-extrabold uppercase flex items-center gap-1.5 cursor-pointer transition-colors border ${subAbaStatus === 'PLANTOES_TRIPULACOES'
+                                ? 'bg-qth-orange text-white border-qth-orange'
+                                : 'bg-qth-bg/70 text-sky-300 border-sky-500/40 hover:border-sky-400'
+                                }`}
+                        >
+                            <Users className="w-3.5 h-3.5" />
+                            <span>PLANTÕES / TRIPULAÇÕES</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 text-slate-200">
+                                {plantoesAtivos.length}
                             </span>
-                            {temFiltroAtivo && (
-                                <button
-                                    type="button"
-                                    onClick={limparFiltros}
-                                    className="bg-slate-800 hover:bg-slate-700 text-qth-orange border border-slate-600 font-bold px-2.5 py-1.5 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer"
-                                >
-                                    <RotateCcw className="w-3 h-3" />
-                                    LIMPAR FILTROS
-                                </button>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
-                        <SelectPesquisavel
-                            label="Prioridade"
-                            opcoes={['TODAS', ...PRIORIDADES.map((p) => p.id)]}
-                            valor={filtroPrioridade}
-                            onChange={setFiltroPrioridade}
-                            placeholder="TODAS"
-                        />
-
-                        <SelectPesquisavel
-                            label="Natureza"
-                            opcoes={['TODAS', ...NATUREZAS_ATENDIMENTO]}
-                            valor={filtroNatureza}
-                            onChange={setFiltroNatureza}
-                            placeholder="TODAS"
-                        />
-
-                        <SelectPesquisavel
-                            label="Município"
-                            opcoes={opcoesMunicipiosFiltro}
-                            valor={filtroMunicipio}
-                            onChange={setFiltroMunicipio}
-                            placeholder="TODOS"
-                        />
-
-                        <SelectPesquisavel
-                            label="Viatura Empenhada"
-                            opcoes={opcoesViaturasFiltro}
-                            valor={filtroViatura}
-                            onChange={setFiltroViatura}
-                            placeholder="TODAS"
-                        />
-
-                        <SelectPesquisavel
-                            label="Vítimas / IMV"
-                            opcoes={['TODAS', 'MULTIPLAS_VITIMAS', 'IMV_ATIVO']}
-                            valor={filtroImv}
-                            onChange={setFiltroImv}
-                            placeholder="TODAS"
-                        />
-                    </div>
+                        </button>
+                    )}
                 </div>
 
-                {/* Listagem de Cards das Ocorrências */}
-                {carregando ? (
-                    <p className="text-xs text-slate-400 text-center py-6">
-                        CARREGANDO OCORRÊNCIAS...
-                    </p>
-                ) : ocorrenciasFiltradas.length === 0 ? (
-                    <div className="text-center py-8 space-y-2">
-                        <p className="text-xs text-slate-400">
-                            NENHUMA OCORRÊNCIA ENCONTRADA NESTA ABA COM OS FILTROS ATUAIS.
-                        </p>
-                        {temFiltroAtivo && (
-                            <button
-                                type="button"
-                                onClick={limparFiltros}
-                                className="text-xs font-bold text-qth-orange hover:underline cursor-pointer"
-                            >
-                                LIMPAR FILTROS
-                            </button>
-                        )}
-                    </div>
+                {subAbaStatus === 'PLANTOES_TRIPULACOES' && podeGerenciarPlantoes ? (
+                    <Suspense
+                        fallback={
+                            <div className="text-center py-8 text-xs text-slate-400 animate-pulse">
+                                CARREGANDO PLANTÕES E TRIPULAÇÕES...
+                            </div>
+                        }
+                    >
+                        <AbaPlantoesTripulacoes
+                            perfil={perfil}
+                            viaturas={viaturas}
+                            plantoesAtivos={plantoesAtivos}
+                            mapaInstituicoes={mapaInstituicoes}
+                            onAtualizado={() => carregarTudo({ silencioso: true })}
+                        />
+                    </Suspense>
                 ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {ocorrenciasFiltradas.map((oc) => {
-                            const prioMeta = obterMetaPrioridade(oc.prioridade)
-                            const vtrsOc = empenhosPorOcorrencia.get(oc.id) || []
-                            const enderecoFmt = formatarEnderecoOcorrencia(oc)
-                            const urlRotaCard = construirUrlRota(oc)
-                            const qtdVit = Math.max(1, parseInt(oc.numero_vitimas, 10) || 1)
-                            const balancoCard = calcularBalancoVitimas(oc, vtrsOc)
-
-                            return (
-                                <div
-                                    key={oc.id}
-                                    onClick={() => abrirOcorrencia(oc, 'RESUMO')}
-                                    className={`bg-qth-bg/75 border-2 rounded-xl p-3.5 space-y-2.5 cursor-pointer transition-all ${oc.protocolo_imv
-                                        ? 'border-qth-red bg-red-950/20 shadow-lg shadow-qth-red/20 hover:border-red-400'
-                                        : prioMeta.card
-                                        }`}
-                                >
-                                    <div className="flex items-start justify-between gap-2">
-                                        <div>
-                                            <div className="flex flex-wrap items-center gap-2">
-                                                <span className="text-sm font-extrabold text-white">
-                                                    OCORRÊNCIA #{oc.numero_ocorrencia || 'S/N'}
-                                                </span>
-                                                <span
-                                                    className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border uppercase ${prioMeta.badge}`}
-                                                >
-                                                    {prioMeta.label}
-                                                </span>
-                                                <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600 uppercase">
-                                                    {oc.status_ocorrencia}
-                                                </span>
-                                                {oc.protocolo_imv ? (
-                                                    <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-qth-red text-white uppercase">
-                                                        IMV ATIVO
-                                                    </span>
-                                                ) : (
-                                                    qtdVit >= 2 && (
-                                                        <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-qth-yellow/25 text-yellow-200 border border-qth-yellow/60 uppercase">
-                                                            {qtdVit} VÍTIMAS
-                                                        </span>
-                                                    )
-                                                )}
-                                            </div>
-                                            <p className="text-xs font-bold text-qth-orange mt-1 uppercase">
-                                                {oc.tipo_atendimento} • {oc.motivo || 'MOTIVO NÃO INFORMADO'}
-                                            </p>
-                                        </div>
-
-                                        <div className="flex items-center gap-2 shrink-0">
-                                            {urlRotaCard && (
-                                                <a
-                                                    href={urlRotaCard}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    onClick={(e) => e.stopPropagation()}
-                                                    className="px-2 py-1 rounded-lg bg-qth-blue/30 hover:bg-qth-blue text-blue-200 hover:text-white border border-blue-500/40 text-[10px] font-extrabold flex items-center gap-1"
-                                                    title="Abrir rota direta no GPS/Maps"
-                                                >
-                                                    <Navigation className="w-3 h-3" />
-                                                    ROTA
-                                                </a>
-                                            )}
-                                            <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
-                                                <Users className="w-3.5 h-3.5" />
-                                                {balancoCard.embarcadasVtr}/{qtdVit}
-                                            </span>
-                                        </div>
-                                    </div>
-
-                                    <p className="text-[11px] text-slate-300 flex items-start gap-1.5">
-                                        <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                                        <span className="uppercase">{enderecoFmt}</span>
-                                    </p>
-
-                                    {oc.quadro_clinico && (
-                                        <p className="text-[11px] text-slate-300 bg-qth-card/80 border border-slate-700/70 rounded-lg px-2.5 py-1.5 line-clamp-2">
-                                            <strong className="text-qth-orange uppercase">QUADRO CLÍNICO:</strong>{' '}
-                                            {oc.quadro_clinico}
-                                        </p>
+                    <>
+                        {/* Barra de Pesquisa Global e Filtros Inteligentes */}
+                        <div className="bg-qth-bg/70 border border-slate-700/80 rounded-xl p-3 space-y-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="relative flex-1 min-w-[220px]">
+                                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                    <input
+                                        type="text"
+                                        value={buscaTexto}
+                                        onChange={(e) => setBuscaTexto(e.target.value.toUpperCase())}
+                                        placeholder="PESQUISAR Nº OCORRÊNCIA, SOLICITANTE, MOTIVO, ENDEREÇO, COORDENADAS OU VTR..."
+                                        className="w-full bg-qth-card border border-slate-600 rounded-lg pl-9 pr-8 py-2 text-xs font-semibold text-white placeholder-slate-500 uppercase focus:outline-none focus:border-qth-orange"
+                                    />
+                                    {buscaTexto && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setBuscaTexto('')}
+                                            className="text-slate-400 hover:text-white absolute right-2.5 top-1/2 -translate-y-1/2 cursor-pointer"
+                                        >
+                                            <X className="w-3.5 h-3.5" />
+                                        </button>
                                     )}
-
-                                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-700/60">
-                                        <div className="flex flex-wrap items-center gap-1.5">
-                                            {vtrsOc.length === 0 ? (
-                                                <span className="text-[10px] font-bold text-slate-400">
-                                                    SEM VTR EMPENHADA
-                                                </span>
-                                            ) : (
-                                                vtrsOc.map((emp) => {
-                                                    const totalCorEmp = somarCoresVtr(emp.vitimas_cores)
-                                                    return (
-                                                        <span
-                                                            key={emp.id}
-                                                            className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-qth-blue/25 text-blue-200 border border-blue-500/40 uppercase"
-                                                        >
-                                                            {emp.prefixo} ({emp.status_empenho}
-                                                            {totalCorEmp > 0 ? ` • ${totalCorEmp} VÍTIMA(S)` : ''})
-                                                        </span>
-                                                    )
-                                                })
-                                            )}
-                                        </div>
-
-                                        <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
-                                            {oc.codigo_j && (
-                                                <span className="text-green-400 uppercase">{oc.codigo_j}</span>
-                                            )}
-                                            {oc.codigo_qta && (
-                                                <span className="text-yellow-300 uppercase">{oc.codigo_qta}</span>
-                                            )}
-                                            <span className="text-qth-orange">ABRIR ›</span>
-                                        </div>
-                                    </div>
                                 </div>
-                            )
-                        })}
-                    </div>
+
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[11px] font-bold text-slate-300 bg-qth-card border border-slate-700 px-2.5 py-1.5 rounded-lg">
+                                        {ocorrenciasFiltradas.length} RESULTADOS
+                                    </span>
+                                    {temFiltroAtivo && (
+                                        <button
+                                            type="button"
+                                            onClick={limparFiltros}
+                                            className="bg-slate-800 hover:bg-slate-700 text-qth-orange border border-slate-600 font-bold px-2.5 py-1.5 rounded-lg text-[11px] flex items-center gap-1 cursor-pointer"
+                                        >
+                                            <RotateCcw className="w-3 h-3" />
+                                            LIMPAR FILTROS
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Chips Múltiplos de Status das Ocorrências (apenas na aba RESUMO GERAL) */}
+                            {subAbaStatus === 'RESUMO_GERAL' && (
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                    <button
+                                        type="button"
+                                        onClick={() => alternarChipStatusGeral('TODOS')}
+                                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase flex items-center gap-1.5 cursor-pointer transition-colors border ${chipsStatusGeral.length === 0
+                                            ? 'bg-qth-orange text-white border-qth-orange'
+                                            : 'bg-qth-card/80 text-slate-300 border-slate-700 hover:border-slate-500'
+                                            }`}
+                                    >
+                                        <span>TODAS</span>
+                                        <span
+                                            className={`text-[10px] px-1.5 py-0.2 rounded-full ${chipsStatusGeral.length === 0
+                                                ? 'bg-black/30 text-white'
+                                                : 'bg-slate-800 text-slate-400'
+                                                }`}
+                                        >
+                                            {contadoresSubAbas.RESUMO_GERAL}
+                                        </span>
+                                    </button>
+
+                                    {[
+                                        { id: 'PENDENTE', label: 'PENDENTES', qtd: contadoresSubAbas.PENDENTE },
+                                        { id: 'DESPACHADA', label: 'DESPACHADAS', qtd: contadoresSubAbas.DESPACHADA },
+                                        { id: 'EM_ANDAMENTO', label: 'EM ANDAMENTO', qtd: contadoresSubAbas.EM_ANDAMENTO },
+                                        { id: 'FINALIZADA', label: 'FINALIZADAS', qtd: contadoresSubAbas.FINALIZADA },
+                                        { id: 'CANCELADA', label: 'CANCELADAS / QTA', qtd: contadoresSubAbas.CANCELADA },
+                                    ].map((chip) => {
+                                        const ativo = chipsStatusGeral.includes(chip.id)
+                                        return (
+                                            <button
+                                                key={chip.id}
+                                                type="button"
+                                                onClick={() => alternarChipStatusGeral(chip.id)}
+                                                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase flex items-center gap-1.5 cursor-pointer transition-colors border ${ativo
+                                                    ? 'bg-qth-orange text-white border-qth-orange'
+                                                    : 'bg-qth-card/80 text-slate-300 border-slate-700 hover:border-slate-500'
+                                                    }`}
+                                            >
+                                                <span>{chip.label}</span>
+                                                <span
+                                                    className={`text-[10px] px-1.5 py-0.2 rounded-full ${ativo
+                                                        ? 'bg-black/30 text-white'
+                                                        : 'bg-slate-800 text-slate-400'
+                                                        }`}
+                                                >
+                                                    {chip.qtd}
+                                                </span>
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                            )}
+
+                            <div className={`grid grid-cols-1 sm:grid-cols-2 ${isMaster ? 'lg:grid-cols-6' : 'lg:grid-cols-5'} gap-2.5`}>
+                                {isMaster && (
+                                    <FiltroMultiSelecao
+                                        label="Instituição / Consórcio"
+                                        opcoes={opcoesInstituicoesFiltro}
+                                        valores={filtroInstituicoes}
+                                        onChange={setFiltroInstituicoes}
+                                        placeholderVazio="TODAS"
+                                    />
+                                )}
+
+                                <FiltroMultiSelecao
+                                    label="Prioridade"
+                                    opcoes={PRIORIDADES.map((p) => ({ value: p.id, label: p.label }))}
+                                    valores={filtroPrioridades}
+                                    onChange={setFiltroPrioridades}
+                                    placeholderVazio="TODAS"
+                                />
+
+                                <FiltroMultiSelecao
+                                    label="Natureza"
+                                    opcoes={NATUREZAS_ATENDIMENTO}
+                                    valores={filtroNaturezas}
+                                    onChange={setFiltroNaturezas}
+                                    placeholderVazio="TODAS"
+                                />
+
+                                <FiltroMultiSelecao
+                                    label="Município"
+                                    opcoes={opcoesMunicipiosFiltro}
+                                    valores={filtroMunicipios}
+                                    onChange={setFiltroMunicipios}
+                                    placeholderVazio="TODOS"
+                                />
+
+                                <FiltroMultiSelecao
+                                    label="Viatura Empenhada"
+                                    opcoes={opcoesViaturasFiltro}
+                                    valores={filtroViaturas}
+                                    onChange={setFiltroViaturas}
+                                    placeholderVazio="TODAS"
+                                />
+
+                                <FiltroMultiSelecao
+                                    label="Vítimas / IMV"
+                                    opcoes={[
+                                        { value: 'MULTIPLAS_VITIMAS', label: 'MÚLTIPLAS VÍTIMAS (2+)' },
+                                        { value: 'IMV_ATIVO', label: 'IMV ATIVO' },
+                                    ]}
+                                    valores={filtroImv}
+                                    onChange={setFiltroImv}
+                                    placeholderVazio="TODAS"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Listagem de Cards das Ocorrências */}
+                        {carregando ? (
+                            <p className="text-xs text-slate-400 text-center py-6">
+                                CARREGANDO OCORRÊNCIAS...
+                            </p>
+                        ) : ocorrenciasFiltradas.length === 0 ? (
+                            <div className="text-center py-8 space-y-2">
+                                <p className="text-xs text-slate-400">
+                                    NENHUMA OCORRÊNCIA ENCONTRADA NESTA ABA COM OS FILTROS ATUAIS.
+                                </p>
+                                {temFiltroAtivo && (
+                                    <button
+                                        type="button"
+                                        onClick={limparFiltros}
+                                        className="text-xs font-bold text-qth-orange hover:underline cursor-pointer"
+                                    >
+                                        LIMPAR FILTROS
+                                    </button>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {ocorrenciasFiltradas.map((oc) => {
+                                    const prioMeta = obterMetaPrioridade(oc.prioridade)
+                                    const vtrsOc = empenhosPorOcorrencia.get(oc.id) || []
+                                    const enderecoFmt = formatarEnderecoOcorrencia(oc)
+                                    const urlRotaCard = construirUrlRota(oc)
+                                    const qtdVit = Math.max(1, parseInt(oc.numero_vitimas, 10) || 1)
+                                    const balancoCard = calcularBalancoVitimas(oc, vtrsOc)
+                                    const nomeConsorcio = mapaInstituicoes[oc.instituicao_id] || ''
+
+                                    return (
+                                        <div
+                                            key={oc.id}
+                                            onClick={() => abrirOcorrencia(oc, 'RESUMO')}
+                                            className={`bg-qth-bg/75 border-2 rounded-xl p-3.5 space-y-2.5 cursor-pointer transition-all ${oc.protocolo_imv
+                                                ? 'border-qth-red bg-red-950/20 shadow-lg shadow-qth-red/20 hover:border-red-400'
+                                                : prioMeta.card
+                                                }`}
+                                        >
+                                            <div className="flex items-start justify-between gap-2">
+                                                <div>
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <span className="text-sm font-extrabold text-white">
+                                                            OCORRÊNCIA #{oc.numero_ocorrencia || 'S/N'}
+                                                        </span>
+                                                        {isMaster && nomeConsorcio && (
+                                                            <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-sky-950/70 text-sky-300 border border-sky-500/40 uppercase flex items-center gap-1">
+                                                                <Building2 className="w-3 h-3" />
+                                                                {nomeConsorcio}
+                                                            </span>
+                                                        )}
+                                                        <span
+                                                            className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border uppercase ${prioMeta.badge}`}
+                                                        >
+                                                            {prioMeta.label}
+                                                        </span>
+                                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-600 uppercase">
+                                                            {oc.status_ocorrencia}
+                                                        </span>
+                                                        {oc.protocolo_imv ? (
+                                                            <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-qth-red text-white uppercase">
+                                                                IMV ATIVO
+                                                            </span>
+                                                        ) : (
+                                                            qtdVit >= 2 && (
+                                                                <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-qth-yellow/25 text-yellow-200 border border-qth-yellow/60 uppercase">
+                                                                    {qtdVit} VÍTIMAS
+                                                                </span>
+                                                            )
+                                                        )}
+                                                    </div>
+                                                    <p className="text-xs font-bold text-qth-orange mt-1 uppercase">
+                                                        {oc.tipo_atendimento} • {oc.motivo || 'MOTIVO NÃO INFORMADO'}
+                                                    </p>
+                                                </div>
+
+                                                <div className="flex items-center gap-2 shrink-0">
+                                                    {urlRotaCard && (
+                                                        <a
+                                                            href={urlRotaCard}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            onClick={(e) => e.stopPropagation()}
+                                                            className="px-2 py-1 rounded-lg bg-qth-blue/30 hover:bg-qth-blue text-blue-200 hover:text-white border border-blue-500/40 text-[10px] font-extrabold flex items-center gap-1"
+                                                            title="Abrir rota direta no GPS/Maps"
+                                                        >
+                                                            <Navigation className="w-3 h-3" />
+                                                            ROTA
+                                                        </a>
+                                                    )}
+                                                    <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
+                                                        <Users className="w-3.5 h-3.5" />
+                                                        {balancoCard.embarcadasVtr}/{qtdVit}
+                                                    </span>
+                                                </div>
+                                            </div>
+
+                                            <p className="text-[11px] text-slate-300 flex items-start gap-1.5">
+                                                <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                                                <span className="uppercase">{enderecoFmt}</span>
+                                            </p>
+
+                                            {oc.quadro_clinico && (
+                                                <p className="text-[11px] text-slate-300 bg-qth-card/80 border border-slate-700/70 rounded-lg px-2.5 py-1.5 line-clamp-2">
+                                                    <strong className="text-qth-orange uppercase">QUADRO CLÍNICO:</strong>{' '}
+                                                    {oc.quadro_clinico}
+                                                </p>
+                                            )}
+
+                                            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-700/60">
+                                                <div className="flex flex-wrap items-center gap-1.5">
+                                                    {vtrsOc.length === 0 ? (
+                                                        <span className="text-[10px] font-bold text-slate-400">
+                                                            SEM VTR EMPENHADA
+                                                        </span>
+                                                    ) : (
+                                                        vtrsOc.map((emp) => {
+                                                            const totalCorEmp = somarCoresVtr(emp.vitimas_cores)
+                                                            return (
+                                                                <span
+                                                                    key={emp.id}
+                                                                    className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-qth-blue/25 text-blue-200 border border-blue-500/40 uppercase"
+                                                                >
+                                                                    {emp.prefixo} ({emp.status_empenho}
+                                                                    {totalCorEmp > 0 ? ` • ${totalCorEmp} VÍTIMA(S)` : ''})
+                                                                </span>
+                                                            )
+                                                        })
+                                                    )}
+                                                </div>
+
+                                                <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-400">
+                                                    {oc.codigo_j && (
+                                                        <span className="text-green-400 uppercase">{oc.codigo_j}</span>
+                                                    )}
+                                                    {oc.codigo_qta && (
+                                                        <span className="text-yellow-300 uppercase">{oc.codigo_qta}</span>
+                                                    )}
+                                                    <span className="text-qth-orange">ABRIR ›</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
+                        )}
+                    </>
                 )}
             </div>
 
@@ -2028,6 +2299,9 @@ export default function PainelCentral({ perfil }) {
                 empenhosDaOcorrencia={empenhosDaOcorrencia}
                 evolucoesDaOcorrencia={evolucoesDaOcorrencia}
                 viaturas={viaturas}
+                remanejamentos={remanejamentos}
+                plantoesAtivos={plantoesAtivos}
+                mapaInstituicoes={mapaInstituicoes}
                 rascunhosVtr={rascunhosVtr}
                 novoPacientePorVtr={novoPacientePorVtr}
                 setNovoPacientePorVtr={setNovoPacientePorVtr}
@@ -2061,6 +2335,8 @@ export default function PainelCentral({ perfil }) {
                 handleEmpenharViatura={handleEmpenharViatura}
                 handleAtualizarStatusEmpenho={handleAtualizarStatusEmpenho}
                 handleDesvincularEmpenho={handleDesvincularEmpenho}
+                handleSolicitarRemanejamento={handleSolicitarRemanejamento}
+                handleCancelarRemanejamento={handleCancelarRemanejamento}
                 alterarHorarioEStatusVtr={alterarHorarioEStatusVtr}
                 horaAtualHhMm={horaAtualHhMm}
                 handleSalvarHorariosVtr={handleSalvarHorariosVtr}

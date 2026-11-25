@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import {
     Lock,
     Save,
@@ -11,6 +12,7 @@ import {
 } from 'lucide-react'
 import SelectPesquisavel from './SelectPesquisavel'
 import BlocoRecursosRegulador from './BlocoRecursosRegulador'
+import cidadesData from '../data/cidades.json'
 import {
     PRIORIDADES,
     CORES_START,
@@ -70,6 +72,19 @@ export default function AbaRegulador({
         quadro_clinico: '',
     }
 
+    const listaEstadosDestino = useMemo(
+        () => (cidadesData?.estados || []).map((e) => e.sigla.toUpperCase()).sort(),
+        []
+    )
+
+    const listaCidadesDestino = useMemo(() => {
+        const sigla = (editRegulador?.destino_uf || '').toUpperCase()
+        const est = (cidadesData?.estados || []).find(
+            (e) => e.sigla.toUpperCase() === sigla
+        )
+        return est ? est.cidades.map((c) => c.toUpperCase()).sort() : []
+    }, [editRegulador?.destino_uf])
+
     const apoioPoliciaAtivo = Boolean(
         editRegulador?.apoio_policia ?? ocorrenciaSelecionada?.apoio_policia
     )
@@ -84,7 +99,7 @@ export default function AbaRegulador({
         ocorrenciaSelecionada?.estado ||
         ocorrenciaSelecionada?.rodovia_uf ||
         ocorrenciaSelecionada?.origem_uf ||
-        'PR'
+        ''
     ).toUpperCase()
     const enderecoCompletoOc = formatarEnderecoOcorrencia(ocorrenciaSelecionada)
 
@@ -95,7 +110,7 @@ export default function AbaRegulador({
             : '',
         ocorrenciaSelecionada?.origem_bairro,
         ocorrenciaSelecionada?.origem_cidade || ocorrenciaSelecionada?.origem_uf
-            ? `${ocorrenciaSelecionada?.origem_cidade || ''} - ${ocorrenciaSelecionada?.origem_uf || 'PR'}`
+            ? `${ocorrenciaSelecionada?.origem_cidade || ''}${ocorrenciaSelecionada?.origem_uf ? ` - ${ocorrenciaSelecionada.origem_uf}` : ''}`
             : '',
     ]
         .filter(Boolean)
@@ -251,7 +266,7 @@ export default function AbaRegulador({
                                 Município / UF
                             </span>
                             <span className="font-extrabold text-white uppercase">
-                                {municipioOc ? `${municipioOc} - ${ufOc}` : ufOc}
+                                {municipioOc && ufOc ? `${municipioOc} - ${ufOc}` : municipioOc || ufOc || 'NÃO INFORMADO'}
                             </span>
                         </div>
                     </div>
@@ -440,44 +455,35 @@ export default function AbaRegulador({
                                 />
                             </div>
 
-                            <div>
-                                <label className="block text-[10px] font-bold text-slate-300 mb-1 uppercase">
-                                    UF *
-                                </label>
-                                <input
-                                    type="text"
-                                    maxLength={2}
-                                    disabled={!podeEditarRegulador}
-                                    placeholder="PR"
-                                    value={editRegulador.destino_uf || ''}
-                                    onChange={(e) =>
-                                        setEditRegulador({
-                                            ...editRegulador,
-                                            destino_uf: e.target.value.toUpperCase(),
-                                        })
-                                    }
-                                    className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                />
-                            </div>
+                            <SelectPesquisavel
+                                label="UF *"
+                                opcoes={listaEstadosDestino}
+                                valor={editRegulador.destino_uf || ''}
+                                disabled={!podeEditarRegulador}
+                                placeholder="UF..."
+                                onChange={(val) =>
+                                    setEditRegulador({
+                                        ...editRegulador,
+                                        destino_uf: (val || '').toUpperCase(),
+                                        destino_cidade: '',
+                                    })
+                                }
+                            />
 
-                            <div>
-                                <label className="block text-[10px] font-bold text-slate-300 mb-1 uppercase">
-                                    Cidade / Município *
-                                </label>
-                                <input
-                                    type="text"
-                                    disabled={!podeEditarRegulador}
-                                    placeholder="MUNICÍPIO DESTINO"
-                                    value={editRegulador.destino_cidade || ''}
-                                    onChange={(e) =>
-                                        setEditRegulador({
-                                            ...editRegulador,
-                                            destino_cidade: e.target.value.toUpperCase(),
-                                        })
-                                    }
-                                    className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                />
-                            </div>
+                            <SelectPesquisavel
+                                label="Cidade / Município *"
+                                opcoes={listaCidadesDestino}
+                                valor={editRegulador.destino_cidade || ''}
+                                disabled={!podeEditarRegulador}
+                                permiteTextoLivre={true}
+                                placeholder="MUNICÍPIO DESTINO"
+                                onChange={(val) =>
+                                    setEditRegulador({
+                                        ...editRegulador,
+                                        destino_cidade: (val || '').toUpperCase(),
+                                    })
+                                }
+                            />
                         </div>
                     </div>
                 )}
@@ -768,288 +774,290 @@ export default function AbaRegulador({
                     </span>
                 </div>
 
-                {empenhosDaOcorrencia.length === 0 ? (
+                {empenhosDaOcorrencia.filter((emp) => (emp.status_empenho || '').toUpperCase() !== 'QTA').length === 0 ? (
                     <p className="text-xs text-slate-400">
                         Nenhuma viatura empenhada nesta ocorrência ainda.
                     </p>
                 ) : (
                     <div className="space-y-3">
-                        {empenhosDaOcorrencia.map((emp) => {
-                            const pacientesVtr = normalizarPacientesVtr(
-                                rascunhosVtr[emp.id]?.pacientes_detalhes ?? emp.pacientes_detalhes
-                            )
-                            const formNovoPac = novoPacientePorVtr[emp.id] || {
-                                nome: '',
-                                idade: '',
-                                tipo_idade: '',
-                                sexo: '',
-                                cor_start: '',
-                                destino: '',
-                                quadro_clinico: '',
-                            }
+                        {empenhosDaOcorrencia
+                            .filter((emp) => (emp.status_empenho || '').toUpperCase() !== 'QTA')
+                            .map((emp) => {
+                                const pacientesVtr = normalizarPacientesVtr(
+                                    rascunhosVtr[emp.id]?.pacientes_detalhes ?? emp.pacientes_detalhes
+                                )
+                                const formNovoPac = novoPacientePorVtr[emp.id] || {
+                                    nome: '',
+                                    idade: '',
+                                    tipo_idade: '',
+                                    sexo: '',
+                                    cor_start: '',
+                                    destino: '',
+                                    quadro_clinico: '',
+                                }
 
-                            return (
-                                <div
-                                    key={emp.id}
-                                    className="bg-qth-card border border-slate-700 rounded-xl p-3 space-y-3"
-                                >
-                                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/70 pb-2">
-                                        <span className="text-xs font-extrabold text-white uppercase">
-                                            {emp.prefixo} ({emp.status_empenho}) • {pacientesVtr.length}{' '}
-                                            PACIENTE(S) CADASTRADO(S)
-                                        </span>
-                                    </div>
-
-                                    {podeEditarClinicaPaciente && (
-                                        <div className="bg-qth-bg/70 border border-slate-700/80 rounded-lg p-2.5 space-y-2">
-                                            <p className="text-[10px] font-extrabold text-sky-300 uppercase flex items-center gap-1">
-                                                <UserPlus className="w-3.5 h-3.5" />
-                                                Adicionar Paciente na {emp.prefixo}
-                                            </p>
-                                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2">
-                                                <input
-                                                    type="text"
-                                                    placeholder="NOME / IDENTIFICAÇÃO"
-                                                    value={formNovoPac.nome}
-                                                    onChange={(e) =>
-                                                        setNovoPacientePorVtr((prev) => ({
-                                                            ...prev,
-                                                            [emp.id]: {
-                                                                ...formNovoPac,
-                                                                nome: e.target.value.toUpperCase(),
-                                                            },
-                                                        }))
-                                                    }
-                                                    className="lg:col-span-2 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase"
-                                                />
-                                                <input
-                                                    type="text"
-                                                    placeholder="IDADE"
-                                                    value={formNovoPac.idade}
-                                                    onChange={(e) =>
-                                                        setNovoPacientePorVtr((prev) => ({
-                                                            ...prev,
-                                                            [emp.id]: {
-                                                                ...formNovoPac,
-                                                                idade: e.target.value.replace(/\D/g, '').slice(0, 3),
-                                                            },
-                                                        }))
-                                                    }
-                                                    className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white"
-                                                />
-                                                <SelectPesquisavel
-                                                    opcoes={TIPOS_IDADE}
-                                                    valor={formNovoPac.tipo_idade}
-                                                    placeholder="TIPO IDADE..."
-                                                    onChange={(val) =>
-                                                        setNovoPacientePorVtr((prev) => ({
-                                                            ...prev,
-                                                            [emp.id]: { ...formNovoPac, tipo_idade: val },
-                                                        }))
-                                                    }
-                                                />
-                                                <SelectPesquisavel
-                                                    opcoes={SEXOS_PACIENTE}
-                                                    valor={formNovoPac.sexo}
-                                                    placeholder="SEXO..."
-                                                    onChange={(val) =>
-                                                        setNovoPacientePorVtr((prev) => ({
-                                                            ...prev,
-                                                            [emp.id]: { ...formNovoPac, sexo: val },
-                                                        }))
-                                                    }
-                                                />
-                                                <SelectPesquisavel
-                                                    opcoes={CORES_START.map((c) => c.id)}
-                                                    valor={formNovoPac.cor_start}
-                                                    placeholder="COR START..."
-                                                    onChange={(val) =>
-                                                        setNovoPacientePorVtr((prev) => ({
-                                                            ...prev,
-                                                            [emp.id]: { ...formNovoPac, cor_start: val },
-                                                        }))
-                                                    }
-                                                />
-                                            </div>
-
-                                            <div className="flex flex-wrap items-center gap-2">
-                                                <input
-                                                    type="text"
-                                                    placeholder="DESTINO / UNIDADE DE SAÚDE"
-                                                    value={formNovoPac.destino}
-                                                    onChange={(e) =>
-                                                        setNovoPacientePorVtr((prev) => ({
-                                                            ...prev,
-                                                            [emp.id]: {
-                                                                ...formNovoPac,
-                                                                destino: e.target.value.toUpperCase(),
-                                                            },
-                                                        }))
-                                                    }
-                                                    className="flex-1 min-w-[180px] bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase"
-                                                />
-                                                <button
-                                                    type="button"
-                                                    disabled={salvandoSecao}
-                                                    onClick={() => handleAdicionarPacienteNaVtr(emp)}
-                                                    className="bg-qth-blue hover:bg-blue-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded text-xs cursor-pointer"
-                                                >
-                                                    + INCLUIR PACIENTE
-                                                </button>
-                                            </div>
+                                return (
+                                    <div
+                                        key={emp.id}
+                                        className="bg-qth-card border border-slate-700 rounded-xl p-3 space-y-3"
+                                    >
+                                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-700/70 pb-2">
+                                            <span className="text-xs font-extrabold text-white uppercase">
+                                                {emp.prefixo} ({emp.status_empenho}) • {pacientesVtr.length}{' '}
+                                                PACIENTE(S) CADASTRADO(S)
+                                            </span>
                                         </div>
-                                    )}
 
-                                    {pacientesVtr.length === 0 ? (
-                                        <p className="text-[11px] text-slate-400">
-                                            Nenhum paciente individualizado cadastrado nesta viatura ainda.
-                                        </p>
-                                    ) : (
-                                        <div className="space-y-2.5">
-                                            {pacientesVtr.map((pac, idxPac) => {
-                                                const textoEvoPac = novaEvolucaoPorPaciente[pac.id] || ''
-                                                return (
-                                                    <div
-                                                        key={pac.id}
-                                                        className="bg-qth-bg/80 border border-slate-700 rounded-lg p-3 space-y-2.5"
+                                        {podeEditarClinicaPaciente && (
+                                            <div className="bg-qth-bg/70 border border-slate-700/80 rounded-lg p-2.5 space-y-2">
+                                                <p className="text-[10px] font-extrabold text-sky-300 uppercase flex items-center gap-1">
+                                                    <UserPlus className="w-3.5 h-3.5" />
+                                                    Adicionar Paciente na {emp.prefixo}
+                                                </p>
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2">
+                                                    <input
+                                                        type="text"
+                                                        placeholder="NOME / IDENTIFICAÇÃO"
+                                                        value={formNovoPac.nome}
+                                                        onChange={(e) =>
+                                                            setNovoPacientePorVtr((prev) => ({
+                                                                ...prev,
+                                                                [emp.id]: {
+                                                                    ...formNovoPac,
+                                                                    nome: e.target.value.toUpperCase(),
+                                                                },
+                                                            }))
+                                                        }
+                                                        className="lg:col-span-2 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="IDADE"
+                                                        value={formNovoPac.idade}
+                                                        onChange={(e) =>
+                                                            setNovoPacientePorVtr((prev) => ({
+                                                                ...prev,
+                                                                [emp.id]: {
+                                                                    ...formNovoPac,
+                                                                    idade: e.target.value.replace(/\D/g, '').slice(0, 3),
+                                                                },
+                                                            }))
+                                                        }
+                                                        className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white"
+                                                    />
+                                                    <SelectPesquisavel
+                                                        opcoes={TIPOS_IDADE}
+                                                        valor={formNovoPac.tipo_idade}
+                                                        placeholder="TIPO IDADE..."
+                                                        onChange={(val) =>
+                                                            setNovoPacientePorVtr((prev) => ({
+                                                                ...prev,
+                                                                [emp.id]: { ...formNovoPac, tipo_idade: val },
+                                                            }))
+                                                        }
+                                                    />
+                                                    <SelectPesquisavel
+                                                        opcoes={SEXOS_PACIENTE}
+                                                        valor={formNovoPac.sexo}
+                                                        placeholder="SEXO..."
+                                                        onChange={(val) =>
+                                                            setNovoPacientePorVtr((prev) => ({
+                                                                ...prev,
+                                                                [emp.id]: { ...formNovoPac, sexo: val },
+                                                            }))
+                                                        }
+                                                    />
+                                                    <SelectPesquisavel
+                                                        opcoes={CORES_START.map((c) => c.id)}
+                                                        valor={formNovoPac.cor_start}
+                                                        placeholder="COR START..."
+                                                        onChange={(val) =>
+                                                            setNovoPacientePorVtr((prev) => ({
+                                                                ...prev,
+                                                                [emp.id]: { ...formNovoPac, cor_start: val },
+                                                            }))
+                                                        }
+                                                    />
+                                                </div>
+
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    <input
+                                                        type="text"
+                                                        placeholder="DESTINO / UNIDADE DE SAÚDE"
+                                                        value={formNovoPac.destino}
+                                                        onChange={(e) =>
+                                                            setNovoPacientePorVtr((prev) => ({
+                                                                ...prev,
+                                                                [emp.id]: {
+                                                                    ...formNovoPac,
+                                                                    destino: e.target.value.toUpperCase(),
+                                                                },
+                                                            }))
+                                                        }
+                                                        className="flex-1 min-w-[180px] bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        disabled={salvandoSecao}
+                                                        onClick={() => handleAdicionarPacienteNaVtr(emp)}
+                                                        className="bg-qth-blue hover:bg-blue-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded text-xs cursor-pointer"
                                                     >
-                                                        <div className="flex flex-wrap items-center justify-between gap-2">
-                                                            <span className="text-xs font-extrabold text-qth-orange uppercase">
-                                                                PACIENTE #{idxPac + 1} • {pac.nome}
-                                                            </span>
+                                                        + INCLUIR PACIENTE
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
 
-                                                            {podeEditarClinicaPaciente && (
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => handleRemoverPacienteNaVtr(emp, pac.id)}
-                                                                    className="p-1.5 rounded bg-qth-red/20 hover:bg-qth-red text-red-300 hover:text-white cursor-pointer"
-                                                                    title="Remover paciente"
-                                                                >
-                                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                                </button>
-                                                            )}
-                                                        </div>
+                                        {pacientesVtr.length === 0 ? (
+                                            <p className="text-[11px] text-slate-400">
+                                                Nenhum paciente individualizado cadastrado nesta viatura ainda.
+                                            </p>
+                                        ) : (
+                                            <div className="space-y-2.5">
+                                                {pacientesVtr.map((pac, idxPac) => {
+                                                    const textoEvoPac = novaEvolucaoPorPaciente[pac.id] || ''
+                                                    return (
+                                                        <div
+                                                            key={pac.id}
+                                                            className="bg-qth-bg/80 border border-slate-700 rounded-lg p-3 space-y-2.5"
+                                                        >
+                                                            <div className="flex flex-wrap items-center justify-between gap-2">
+                                                                <span className="text-xs font-extrabold text-qth-orange uppercase">
+                                                                    PACIENTE #{idxPac + 1} • {pac.nome}
+                                                                </span>
 
-                                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
-                                                            <input
-                                                                type="text"
-                                                                disabled={!podeEditarClinicaPaciente}
-                                                                placeholder="NOME / IDENTIFICAÇÃO"
-                                                                value={pac.nome}
-                                                                onChange={(e) =>
-                                                                    handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                        nome: e.target.value.toUpperCase(),
-                                                                    })
-                                                                }
-                                                                className="lg:col-span-2 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs font-semibold text-white uppercase disabled:opacity-60"
-                                                            />
-                                                            <input
-                                                                type="text"
-                                                                disabled={!podeEditarClinicaPaciente}
-                                                                placeholder="IDADE"
-                                                                value={pac.idade}
-                                                                onChange={(e) =>
-                                                                    handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                        idade: e.target.value
-                                                                            .replace(/\D/g, '')
-                                                                            .slice(0, 3),
-                                                                    })
-                                                                }
-                                                                className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white disabled:opacity-60"
-                                                            />
-                                                            <SelectPesquisavel
-                                                                opcoes={CORES_START.map((c) => c.id)}
-                                                                valor={pac.cor_start}
-                                                                placeholder="COR START..."
-                                                                disabled={!podeEditarClinicaPaciente}
-                                                                onChange={(val) =>
-                                                                    handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                        cor_start: val,
-                                                                    })
-                                                                }
-                                                            />
-                                                            <input
-                                                                type="text"
-                                                                disabled={!podeEditarClinicaPaciente}
-                                                                placeholder="DESTINO / HOSPITAL"
-                                                                value={pac.destino}
-                                                                onChange={(e) =>
-                                                                    handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                        destino: e.target.value.toUpperCase(),
-                                                                    })
-                                                                }
-                                                                className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase disabled:opacity-60"
-                                                            />
-                                                        </div>
+                                                                {podeEditarClinicaPaciente && (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => handleRemoverPacienteNaVtr(emp, pac.id)}
+                                                                        className="p-1.5 rounded bg-qth-red/20 hover:bg-qth-red text-red-300 hover:text-white cursor-pointer"
+                                                                        title="Remover paciente"
+                                                                    >
+                                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                )}
+                                                            </div>
 
-                                                        <textarea
-                                                            rows={2}
-                                                            disabled={!podeEditarClinicaPaciente}
-                                                            placeholder="Quadro clínico individual deste paciente..."
-                                                            value={pac.quadro_clinico || ''}
-                                                            onChange={(e) =>
-                                                                handleAtualizarCampoPacienteLocal(emp, pac.id, {
-                                                                    quadro_clinico: e.target.value,
-                                                                })
-                                                            }
-                                                            className="w-full bg-qth-card border border-slate-600 rounded p-2 text-xs text-white disabled:opacity-60"
-                                                        />
-
-                                                        {podeEditarClinicaPaciente && (
-                                                            <div className="flex flex-col sm:flex-row gap-2">
+                                                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
                                                                 <input
                                                                     type="text"
-                                                                    placeholder="Nova evolução clínica deste paciente..."
-                                                                    value={textoEvoPac}
+                                                                    disabled={!podeEditarClinicaPaciente}
+                                                                    placeholder="NOME / IDENTIFICAÇÃO"
+                                                                    value={pac.nome}
                                                                     onChange={(e) =>
-                                                                        setNovaEvolucaoPorPaciente((prev) => ({
-                                                                            ...prev,
-                                                                            [pac.id]: e.target.value,
-                                                                        }))
+                                                                        handleAtualizarCampoPacienteLocal(emp, pac.id, {
+                                                                            nome: e.target.value.toUpperCase(),
+                                                                        })
                                                                     }
-                                                                    className="flex-1 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white"
+                                                                    className="lg:col-span-2 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs font-semibold text-white uppercase disabled:opacity-60"
                                                                 />
-                                                                <button
-                                                                    type="button"
-                                                                    disabled={salvandoSecao}
-                                                                    onClick={() => handleSalvarPacienteNaVtr(emp, pac.id)}
-                                                                    className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded text-xs flex items-center justify-center gap-1 cursor-pointer"
-                                                                >
-                                                                    <Save className="w-3.5 h-3.5" />
-                                                                    SALVAR PACIENTE
-                                                                </button>
+                                                                <input
+                                                                    type="text"
+                                                                    disabled={!podeEditarClinicaPaciente}
+                                                                    placeholder="IDADE"
+                                                                    value={pac.idade}
+                                                                    onChange={(e) =>
+                                                                        handleAtualizarCampoPacienteLocal(emp, pac.id, {
+                                                                            idade: e.target.value
+                                                                                .replace(/\D/g, '')
+                                                                                .slice(0, 3),
+                                                                        })
+                                                                    }
+                                                                    className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white disabled:opacity-60"
+                                                                />
+                                                                <SelectPesquisavel
+                                                                    opcoes={CORES_START.map((c) => c.id)}
+                                                                    valor={pac.cor_start}
+                                                                    placeholder="COR START..."
+                                                                    disabled={!podeEditarClinicaPaciente}
+                                                                    onChange={(val) =>
+                                                                        handleAtualizarCampoPacienteLocal(emp, pac.id, {
+                                                                            cor_start: val,
+                                                                        })
+                                                                    }
+                                                                />
+                                                                <input
+                                                                    type="text"
+                                                                    disabled={!podeEditarClinicaPaciente}
+                                                                    placeholder="DESTINO / HOSPITAL"
+                                                                    value={pac.destino}
+                                                                    onChange={(e) =>
+                                                                        handleAtualizarCampoPacienteLocal(emp, pac.id, {
+                                                                            destino: e.target.value.toUpperCase(),
+                                                                        })
+                                                                    }
+                                                                    className="bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white uppercase disabled:opacity-60"
+                                                                />
                                                             </div>
-                                                        )}
 
-                                                        {Array.isArray(pac.evolucoes) &&
-                                                            pac.evolucoes.length > 0 && (
-                                                                <div className="space-y-1 pt-1">
-                                                                    {pac.evolucoes.map((ev) => (
-                                                                        <div
-                                                                            key={ev.id}
-                                                                            className="bg-qth-card/80 border border-slate-700/70 rounded p-2 text-[11px]"
-                                                                        >
-                                                                            <span className="text-[10px] font-bold text-qth-orange">
-                                                                                {ev.autor_nome} ({ev.autor_cargo}) •{' '}
-                                                                                {ev.criado_em
-                                                                                    ? new Date(ev.criado_em).toLocaleString(
-                                                                                        'pt-BR'
-                                                                                    )
-                                                                                    : ''}
-                                                                            </span>
-                                                                            <p className="text-white mt-0.5">{ev.texto}</p>
-                                                                        </div>
-                                                                    ))}
+                                                            <textarea
+                                                                rows={2}
+                                                                disabled={!podeEditarClinicaPaciente}
+                                                                placeholder="Quadro clínico individual deste paciente..."
+                                                                value={pac.quadro_clinico || ''}
+                                                                onChange={(e) =>
+                                                                    handleAtualizarCampoPacienteLocal(emp, pac.id, {
+                                                                        quadro_clinico: e.target.value,
+                                                                    })
+                                                                }
+                                                                className="w-full bg-qth-card border border-slate-600 rounded p-2 text-xs text-white disabled:opacity-60"
+                                                            />
+
+                                                            {podeEditarClinicaPaciente && (
+                                                                <div className="flex flex-col sm:flex-row gap-2">
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="Nova evolução clínica deste paciente..."
+                                                                        value={textoEvoPac}
+                                                                        onChange={(e) =>
+                                                                            setNovaEvolucaoPorPaciente((prev) => ({
+                                                                                ...prev,
+                                                                                [pac.id]: e.target.value,
+                                                                            }))
+                                                                        }
+                                                                        className="flex-1 bg-qth-card border border-slate-600 rounded px-2.5 py-1.5 text-xs text-white"
+                                                                    />
+                                                                    <button
+                                                                        type="button"
+                                                                        disabled={salvandoSecao}
+                                                                        onClick={() => handleSalvarPacienteNaVtr(emp, pac.id)}
+                                                                        className="bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold px-3 py-1.5 rounded text-xs flex items-center justify-center gap-1 cursor-pointer"
+                                                                    >
+                                                                        <Save className="w-3.5 h-3.5" />
+                                                                        SALVAR PACIENTE
+                                                                    </button>
                                                                 </div>
                                                             )}
-                                                    </div>
-                                                )
-                                            })}
-                                        </div>
-                                    )}
-                                </div>
-                            )
-                        })}
+
+                                                            {Array.isArray(pac.evolucoes) &&
+                                                                pac.evolucoes.length > 0 && (
+                                                                    <div className="space-y-1 pt-1">
+                                                                        {pac.evolucoes.map((ev) => (
+                                                                            <div
+                                                                                key={ev.id}
+                                                                                className="bg-qth-card/80 border border-slate-700/70 rounded p-2 text-[11px]"
+                                                                            >
+                                                                                <span className="text-[10px] font-bold text-qth-orange">
+                                                                                    {ev.autor_nome} ({ev.autor_cargo}) •{' '}
+                                                                                    {ev.criado_em
+                                                                                        ? new Date(ev.criado_em).toLocaleString(
+                                                                                            'pt-BR'
+                                                                                        )
+                                                                                        : ''}
+                                                                                </span>
+                                                                                <p className="text-white mt-0.5">{ev.texto}</p>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                        </div>
+                                                    )
+                                                })}
+                                            </div>
+                                        )}
+                                    </div>
+                                )
+                            })}
                     </div>
                 )}
             </div>

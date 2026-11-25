@@ -2,11 +2,12 @@ import { useEffect, useState, lazy, Suspense } from 'react'
 import { supabase } from './lib/supabase'
 import Login from './components/Login'
 import PrimeiroAcesso from './components/PrimeiroAcesso'
-import { LogOut, Radio, Settings, ShieldAlert, Truck, User } from 'lucide-react'
+import { Building2, LogOut, Radio, Settings, ShieldAlert, Truck, User } from 'lucide-react'
 
 const PainelCentral = lazy(() => import('./components/PainelCentral'))
 const PainelFrota = lazy(() => import('./components/PainelFrota'))
 const PainelGestor = lazy(() => import('./components/PainelGestor'))
+const PainelInstituicoes = lazy(() => import('./components/PainelInstituicoes'))
 const PainelPerfil = lazy(() => import('./components/PainelPerfil'))
 
 export default function App() {
@@ -111,6 +112,7 @@ export default function App() {
 
   const cargo = (perfil?.cargo || '').toUpperCase()
   const nomeUsuario = (perfil?.nome_completo || session.user.email).toUpperCase()
+  const isMaster = Boolean(perfil?.is_platform_owner)
 
   if (!perfil || perfil.ativo === false || cargo === 'TRIPULANTE') {
     return (
@@ -198,6 +200,20 @@ export default function App() {
               </button>
             )}
 
+            {isMaster && (
+              <button
+                onClick={() => setAbaAtiva('INSTITUICOES')}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  abaAtiva === 'INSTITUICOES'
+                    ? 'bg-qth-orange text-white'
+                    : 'text-slate-300 hover:bg-slate-700/60'
+                }`}
+              >
+                <Building2 className="w-3.5 h-3.5" />
+                <span>INSTITUIÇÕES</span>
+              </button>
+            )}
+
             <button
               onClick={() => setAbaAtiva('PERFIL')}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
@@ -250,6 +266,12 @@ export default function App() {
           {abasVisitadas.GESTOR && isGestorOuCoord && (
             <div className={abaAtiva === 'GESTOR' ? 'block' : 'hidden'}>
               <PainelGestor perfilLogado={perfil} />
+            </div>
+          )}
+
+          {abasVisitadas.INSTITUICOES && isMaster && (
+            <div className={abaAtiva === 'INSTITUICOES' ? 'block' : 'hidden'}>
+              <PainelInstituicoes perfilLogado={perfil} />
             </div>
           )}
 

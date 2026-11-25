@@ -10,6 +10,26 @@ import {
     calcularBalancoVitimas,
 } from './painelCentralHelpers'
 
+const STATUS_EMPENHO_LIBERADOS_FINALIZACAO = new Set([
+    'FINALIZADA',
+    'ENCERRADA',
+])
+
+const STATUS_FROTA_BAIXADA = new Set([
+    'BAIXADA',
+    'BAIXADO',
+    'INATIVA',
+    'INDISPONIVEL_BAIXA',
+])
+
+const STATUS_PERMITIDOS_REMANEJAMENTO = new Set([
+    'ACIONADA',
+    'EMPENHADA',
+    'QTI',
+    'QTI BASE QAP',
+    'DISPONIVEL',
+])
+
 function construirDirecionamentoVtr(solicitacaoContexto, ocorrenciaSelecionada, normalizarRecursosSolicitados) {
     const reqFonte =
         solicitacaoContexto ||
@@ -61,10 +81,22 @@ export async function executarEmpenharViatura({
 }) {
     const prefixoAlvo = (prefixoOverride || viaturaParaEmpenhar || '').trim().toUpperCase()
     if (!podeEditarRadio || !ocorrenciaSelecionada || !prefixoAlvo) return
-    const vtrObj = viaturas.find(
-        (v) => v.prefixo.toUpperCase() === prefixoAlvo
-    )
+
+    const instituicaoOcId = ocorrenciaSelecionada?.instituicao_id || null
+    const viaturasElegiveis = instituicaoOcId
+        ? viaturas.filter((v) => !v.instituicao_id || v.instituicao_id === instituicaoOcId)
+        : viaturas
+
+    const vtrObj =
+        viaturasElegiveis.find((v) => v.prefixo.toUpperCase() === prefixoAlvo) ||
+        viaturas.find((v) => v.prefixo.toUpperCase() === prefixoAlvo)
+
     if (!vtrObj) return
+
+    if (instituicaoOcId && vtrObj.instituicao_id && vtrObj.instituicao_id !== instituicaoOcId) {
+        setMensagemModal(`A viatura ${vtrObj.prefixo} pertence a outra instituição e não está disponível para esta ocorrência.`)
+        return
+    }
 
     const jaVinculada = empenhosDaOcorrencia.some((e) => e.viatura_id === vtrObj.id)
     if (jaVinculada) {
@@ -84,6 +116,7 @@ export async function executarEmpenharViatura({
 
     try {
         const insertBase = {
+            instituicao_id: instituicaoOcId || vtrObj.instituicao_id || null,
             ocorrencia_id: ocorrenciaSelecionada.id,
             viatura_id: vtrObj.id,
             prefixo: vtrObj.prefixo.toUpperCase(),
@@ -568,11 +601,122 @@ export async function executarDesvincularEmpenho({
     }
 }
 
+export async function executarSolicitarRemanejamento({
+    perfil,
+    podeEditarRadio,
+    empOrigem,
+    ocorrenciaDestino,
+    solicitacaoDestino = null,
+    motivoCentral = '',
+    setSalvandoSecao,
+    setMensagemModal,
+    carregarTudo,
+}) {
+    if (!podeEditarRadio || !empOrigem || !ocorrenciaDestino) return
+    const statusUpper = String(empOrigem.status_empenho || '').trim().toUpperCase()
+
+    if (!STATUS_PERMITIDOS_REMANEJAMENTO.has(statusUpper)) {
+        setMensagemModal(
+            `Remanejamento bloqueado: a viatura ${empOrigem.prefixo} está em ${statusUpper} (permitido apenas antes de chegar ao QTH ou após sair da unidade de saúde).`
+        )
+        return
+    }
+
+    setSalvandoSecao(true)
+    setMensagemModal('')
+
+    try {
+        const direcionamentoDestino = {
+            recurso_solicitado: String(solicitacaoDestino?.recurso || ocorrenciaDestino?.recurso_indicado || '')
+                .trim()
+                .toUpperCase(),
+            paciente_id: solicitacaoDestino?.paciente_id || '',
+            paciente_nome: String(solicitacaoDestino?.paciente_info?.nome || solicitacaoDestino?.paciente_nome || '')
+                .trim()
+                .toUpperCase(),
+            sem_paciente_especifico: !(solicitacaoDestino?.paciente_info?.nome || solicitacaoDestino?.paciente_nome || solicitacaoDestino?.paciente_id),
+            observacao: String(solicitacaoDestino?.observacao || '').trim().toUpperCase(),
+        }
+
+        const { data, error } = await supabase.rpc('solicitar_remanejamento_viatura', {
+            p_empenho_origem_id: empOrigem.id,
+            p_ocorrencia_destino_id: ocorrenciaDestino.id,
+            p_solicitacao_destino_id: solicitacaoDestino?.id || null,
+            p_direcionamento_destino: direcionamentoDestino,
+            p_motivo_central: motivoCentral || `REALOCAÇÃO PARA OCORRÊNCIA #${ocorrenciaDestino.numero_ocorrencia || ''}`,
+            p_solicitado_por_id: perfil?.id || null,
+            p_solicitado_por_nome: perfil?.nome_completo || '',
+        })
+
+        if (error) {
+            setMensagemModal(`Erro ao solicitar remanejamento: ${error.message}`)
+            return
+        }
+
+        await registrarAuditoria({
+            perfil,
+            tabela: 'viatura_remanejamentos',
+            registroId: data?.remanejamento_id || empOrigem.id,
+            acao: 'CRIACAO',
+            campo: 'SOLICITACAO_REMANEJAMENTO',
+            valorNovo: `VTR ${empOrigem.prefixo}: Ocorrência ${empOrigem.ocorrencia_id} -> #${ocorrenciaDestino.numero_ocorrencia || ocorrenciaDestino.id}`,
+        })
+
+        setMensagemModal(
+            `Solicitação de remanejamento da ${empOrigem.prefixo} enviada para aceite do condutor (#${ocorrenciaDestino.numero_ocorrencia || ocorrenciaDestino.id}).`
+        )
+        await carregarTudo({ silencioso: true })
+    } finally {
+        setSalvandoSecao(false)
+    }
+}
+
+export async function executarCancelarRemanejamento({
+    perfil,
+    podeEditarRadio,
+    remanejamentoId,
+    prefixo = '',
+    setSalvandoSecao,
+    setMensagemModal,
+    carregarTudo,
+}) {
+    if (!podeEditarRadio || !remanejamentoId) return
+    setSalvandoSecao(true)
+    setMensagemModal('')
+
+    try {
+        const { error } = await supabase.rpc('cancelar_remanejamento_viatura', {
+            p_remanejamento_id: remanejamentoId,
+            p_cancelado_por_nome: perfil?.nome_completo || 'CENTRAL',
+        })
+
+        if (error) {
+            setMensagemModal(`Erro ao cancelar remanejamento: ${error.message}`)
+            return
+        }
+
+        await registrarAuditoria({
+            perfil,
+            tabela: 'viatura_remanejamentos',
+            registroId: remanejamentoId,
+            acao: 'EDICAO',
+            campo: 'CANCELAMENTO_REMANEJAMENTO',
+            valorNovo: `Remanejamento ${prefixo ? `da ${prefixo} ` : ''}cancelado pela central; estado anterior restaurado.`,
+        })
+
+        setMensagemModal('Remanejamento cancelado pela central. Estado anterior restaurado no aplicativo e na fila.')
+        await carregarTudo({ silencioso: true })
+    } finally {
+        setSalvandoSecao(false)
+    }
+}
+
 export async function executarSalvarRadio({
     perfil,
     podeEditarRadio,
     ocorrenciaSelecionada,
     empenhosDaOcorrencia,
+    viaturas = [],
     editRadio,
     statusForcado = null,
     setEditRadio,
@@ -586,6 +730,36 @@ export async function executarSalvarRadio({
     setMensagemModal('')
 
     const statusFinal = statusForcado || editRadio.status_ocorrencia || 'PENDENTE'
+
+    if (statusFinal === 'FINALIZADA') {
+        const bloqueios = (empenhosDaOcorrencia || []).filter((emp) => {
+            const stEmp = String(emp.status_empenho || '').trim().toUpperCase()
+            if (STATUS_EMPENHO_LIBERADOS_FINALIZACAO.has(stEmp)) return false
+
+            const vtrFro = Array.isArray(viaturas)
+                ? viaturas.find(
+                    (v) =>
+                        (emp.viatura_id && v.id === emp.viatura_id) ||
+                        (emp.prefixo && String(v.prefixo || '').trim().toUpperCase() === String(emp.prefixo || '').trim().toUpperCase())
+                )
+                : null
+            const stFro = String(vtrFro?.status || '').trim().toUpperCase()
+            if (STATUS_FROTA_BAIXADA.has(stFro)) return false
+
+            return true
+        })
+
+        if (bloqueios.length > 0) {
+            const listaBloqueios = bloqueios
+                .map((emp) => `${emp.prefixo} (${String(emp.status_empenho || 'EMPENHADA').toUpperCase()})`)
+                .join(', ')
+            setMensagemModal(
+                `Não é possível finalizar a ocorrência: existem viaturas ainda empenhadas fora de FINALIZADA/ENCERRADA/BAIXADA: ${listaBloqueios}.`
+            )
+            setSalvandoSecao(false)
+            return
+        }
+    }
 
     const payload = {
         status_ocorrencia: statusFinal,

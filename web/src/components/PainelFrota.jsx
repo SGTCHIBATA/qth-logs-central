@@ -2,8 +2,9 @@ import { useEffect, useState, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { registrarAuditoria, registrarAlteracoesEmLote } from '../lib/auditoria'
 import SelectPesquisavel from './SelectPesquisavel'
+import FiltroMultiSelecao from './FiltroMultiSelecao'
 import cidadesData from '../data/cidades.json'
-import { Truck, Plus, Edit3, Trash2, Save, X, Gauge, Search, RotateCcw } from 'lucide-react'
+import { Truck, Plus, Edit3, Trash2, Save, X, Gauge, Search, RotateCcw, Building2 } from 'lucide-react'
 
 const TIPOS_VTR = ['USA', 'USB', 'MOTOLANCIA', 'AEROMEDICO', 'VIR', 'APOIO']
 const STATUS_VTR = [
@@ -41,6 +42,7 @@ const FORM_INICIAL = {
   prefixo: '',
   placa: '',
   tipo: '',
+  instituicao_id: '',
   estado: '',
   cidade: '',
   km_atual: '',
@@ -50,6 +52,7 @@ const FORM_INICIAL = {
 export default function PainelFrota({ perfil }) {
   const [viaturas, setViaturas] = useState([])
   const [veiculos, setVeiculos] = useState([])
+  const [instituicoes, setInstituicoes] = useState([])
   const [carregando, setCarregando] = useState(true)
   const [form, setForm] = useState(FORM_INICIAL)
   const [editandoId, setEditandoId] = useState(null)
@@ -60,11 +63,12 @@ export default function PainelFrota({ perfil }) {
   // Pesquisa global e filtros da aba FROTA
   const [buscaTexto, setBuscaTexto] = useState('')
   const [chipGrupo, setChipGrupo] = useState('TODOS')
-  const [filtroStatus, setFiltroStatus] = useState('TODOS')
-  const [filtroTipo, setFiltroTipo] = useState('TODOS')
-  const [filtroCidade, setFiltroCidade] = useState('TODAS')
-  const [filtroEstado, setFiltroEstado] = useState('TODAS')
-  const [filtroVinculoPlaca, setFiltroVinculoPlaca] = useState('TODAS')
+  const [filtroStatuses, setFiltroStatuses] = useState([])
+  const [filtroTipos, setFiltroTipos] = useState([])
+  const [filtroInstituicoes, setFiltroInstituicoes] = useState([])
+  const [filtroCidades, setFiltroCidades] = useState([])
+  const [filtroEstados, setFiltroEstados] = useState([])
+  const [filtroVinculosPlaca, setFiltroVinculosPlaca] = useState([])
 
   const listaEstados = useMemo(
     () => (cidadesData?.estados || []).map((e) => e.sigla.toUpperCase()).sort(),
@@ -78,6 +82,19 @@ export default function PainelFrota({ perfil }) {
     return est ? est.cidades.map((c) => c.toUpperCase()).sort() : []
   }, [form.estado])
 
+  const mapaInstituicoes = useMemo(() => {
+    const map = {}
+    for (const inst of instituicoes) {
+      map[inst.id] = (inst.sigla || inst.nome || '').toUpperCase()
+    }
+    return map
+  }, [instituicoes])
+
+  const opcoesInstituicoesFiltro = useMemo(
+    () => instituicoes.map((inst) => (inst.sigla || inst.nome || '').toUpperCase()).filter(Boolean).sort(),
+    [instituicoes]
+  )
+
   const opcoesPlacas = useMemo(
     () => veiculos.map((v) => v.placa.toUpperCase()).sort(),
     [veiculos]
@@ -89,7 +106,7 @@ export default function PainelFrota({ perfil }) {
       const c = (v.cidade || v.base_cidade || '').trim().toUpperCase()
       if (c) setCid.add(c)
     }
-    return ['TODAS', ...Array.from(setCid).sort()]
+    return Array.from(setCid).sort()
   }, [viaturas])
 
   const opcoesEstadosFiltro = useMemo(() => {
@@ -98,7 +115,7 @@ export default function PainelFrota({ perfil }) {
       const uf = (v.estado || '').trim().toUpperCase()
       if (uf) setUf.add(uf)
     }
-    return ['TODAS', ...Array.from(setUf).sort()]
+    return Array.from(setUf).sort()
   }, [viaturas])
 
   useEffect(() => {
@@ -116,6 +133,11 @@ export default function PainelFrota({ perfil }) {
         { event: '*', schema: 'public', table: 'veiculos' },
         () => buscarFrota()
       )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'instituicoes' },
+        () => buscarFrota()
+      )
       .subscribe()
 
     return () => {
@@ -124,36 +146,40 @@ export default function PainelFrota({ perfil }) {
   }, [])
 
   async function buscarFrota() {
-    const [{ data: dataVtrs, error: errVtrs }, { data: dataVecs }] = await Promise.all([
+    const [{ data: dataVtrs, error: errVtrs }, { data: dataVecs }, { data: dataInsts }] = await Promise.all([
       supabase
         .from('viaturas')
         .select('*, veiculo:veiculos(id, placa, km_atual)')
         .order('prefixo', { ascending: true }),
       supabase.from('veiculos').select('*').order('placa', { ascending: true }),
+      supabase.from('instituicoes').select('*').order('nome', { ascending: true }),
     ])
 
     if (!errVtrs && dataVtrs) setViaturas(dataVtrs)
     if (dataVecs) setVeiculos(dataVecs)
+    if (dataInsts) setInstituicoes(dataInsts)
     setCarregando(false)
   }
 
   const temFiltroAtivo =
     buscaTexto.trim() !== '' ||
     chipGrupo !== 'TODOS' ||
-    filtroStatus !== 'TODOS' ||
-    filtroTipo !== 'TODOS' ||
-    filtroCidade !== 'TODAS' ||
-    filtroEstado !== 'TODAS' ||
-    filtroVinculoPlaca !== 'TODAS'
+    filtroStatuses.length > 0 ||
+    filtroTipos.length > 0 ||
+    filtroInstituicoes.length > 0 ||
+    filtroCidades.length > 0 ||
+    filtroEstados.length > 0 ||
+    filtroVinculosPlaca.length > 0
 
   function limparFiltros() {
     setBuscaTexto('')
     setChipGrupo('TODOS')
-    setFiltroStatus('TODOS')
-    setFiltroTipo('TODOS')
-    setFiltroCidade('TODAS')
-    setFiltroEstado('TODAS')
-    setFiltroVinculoPlaca('TODAS')
+    setFiltroStatuses([])
+    setFiltroTipos([])
+    setFiltroInstituicoes([])
+    setFiltroCidades([])
+    setFiltroEstados([])
+    setFiltroVinculosPlaca([])
   }
 
   const viaturasFiltradas = useMemo(() => {
@@ -164,6 +190,7 @@ export default function PainelFrota({ perfil }) {
       const placaReal = (vtr.veiculo?.placa || vtr.placa || '').toUpperCase()
       const kmReal = String(vtr.veiculo?.km_atual ?? vtr.km_atual ?? '').toUpperCase()
       const tipo = (vtr.tipo || '').toUpperCase()
+      const nomeInst = (mapaInstituicoes[vtr.instituicao_id] || '').toUpperCase()
       const cidade = (vtr.cidade || vtr.base_cidade || '').toUpperCase()
       const estado = (vtr.estado || '').toUpperCase()
       const status = (vtr.status || '').toUpperCase()
@@ -172,6 +199,7 @@ export default function PainelFrota({ perfil }) {
         const match =
           prefixo.includes(termo) ||
           placaReal.includes(termo) ||
+          nomeInst.includes(termo) ||
           cidade.includes(termo) ||
           estado.includes(termo) ||
           tipo.includes(termo) ||
@@ -184,15 +212,18 @@ export default function PainelFrota({ perfil }) {
       if (chipGrupo === 'ATENDIMENTO' && !STATUS_EM_ATENDIMENTO.includes(status)) return false
       if (chipGrupo === 'INDISPONIVEIS' && !STATUS_INDISPONIVEIS.includes(status)) return false
 
-      if (filtroStatus !== 'TODOS' && status !== filtroStatus) return false
-      if (filtroTipo !== 'TODOS' && tipo !== filtroTipo) return false
-      if (filtroCidade !== 'TODAS' && cidade !== filtroCidade) return false
-      if (filtroEstado !== 'TODAS' && estado !== filtroEstado) return false
+      if (filtroStatuses.length > 0 && !filtroStatuses.includes(status)) return false
+      if (filtroTipos.length > 0 && !filtroTipos.includes(tipo)) return false
+      if (filtroInstituicoes.length > 0 && !filtroInstituicoes.includes(nomeInst)) return false
+      if (filtroCidades.length > 0 && !filtroCidades.includes(cidade)) return false
+      if (filtroEstados.length > 0 && !filtroEstados.includes(estado)) return false
 
-      if (filtroVinculoPlaca !== 'TODAS') {
+      if (filtroVinculosPlaca.length > 0) {
         const temPlaca = Boolean(vtr.veiculo?.placa || vtr.placa)
-        if (filtroVinculoPlaca === 'COM PLACA VINCULADA' && !temPlaca) return false
-        if (filtroVinculoPlaca === 'SEM PLACA VINCULADA' && temPlaca) return false
+        const bateVinculo =
+          (filtroVinculosPlaca.includes('COM PLACA VINCULADA') && temPlaca) ||
+          (filtroVinculosPlaca.includes('SEM PLACA VINCULADA') && !temPlaca)
+        if (!bateVinculo) return false
       }
 
       return true
@@ -201,11 +232,13 @@ export default function PainelFrota({ perfil }) {
     viaturas,
     buscaTexto,
     chipGrupo,
-    filtroStatus,
-    filtroTipo,
-    filtroCidade,
-    filtroEstado,
-    filtroVinculoPlaca,
+    filtroStatuses,
+    filtroTipos,
+    filtroInstituicoes,
+    filtroCidades,
+    filtroEstados,
+    filtroVinculosPlaca,
+    mapaInstituicoes,
   ])
 
   function handlePlacaChange(novaPlaca) {
@@ -229,6 +262,7 @@ export default function PainelFrota({ perfil }) {
       prefixo: (vtr.prefixo || '').toUpperCase(),
       placa: placaReal,
       tipo: (vtr.tipo || '').toUpperCase(),
+      instituicao_id: vtr.instituicao_id || perfil?.instituicao_id || '',
       estado: (vtr.estado || '').toUpperCase(),
       cidade: (vtr.cidade || vtr.base_cidade || '').toUpperCase(),
       km_atual: kmReal,
@@ -250,7 +284,7 @@ export default function PainelFrota({ perfil }) {
     setSalvando(true)
 
     const placaUpper = form.placa.trim().toUpperCase()
-    const kmLimpo = form.km_atual.replace(/\D/g, '')
+    const kmLimpo = String(form.km_atual || '').replace(/\D/g, '')
     const cidadeUpper = form.cidade.trim().toUpperCase()
 
     const veiculoAnterior = veiculos.find((v) => v.placa.toUpperCase() === placaUpper)
@@ -295,10 +329,13 @@ export default function PainelFrota({ perfil }) {
       })
     }
 
+    const instituicaoEscolhida = form.instituicao_id || perfil?.instituicao_id || null
+
     const payload = {
       prefixo: form.prefixo.trim().toUpperCase(),
       placa: placaUpper,
       veiculo_id: veiculoSalvo.id,
+      instituicao_id: instituicaoEscolhida,
       tipo: form.tipo.trim().toUpperCase(),
       estado: form.estado.trim().toUpperCase(),
       cidade: cidadeUpper,
@@ -322,7 +359,7 @@ export default function PainelFrota({ perfil }) {
           registroId: editandoId,
           anterior: vtrOriginal,
           novo: payload,
-          campos: ['prefixo', 'placa', 'tipo', 'estado', 'cidade', 'status'],
+          campos: ['prefixo', 'placa', 'tipo', 'instituicao_id', 'estado', 'cidade', 'status'],
         })
         cancelarEdicao()
         buscarFrota()
@@ -447,6 +484,24 @@ export default function PainelFrota({ perfil }) {
 
           <div>
             <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
+              Instituição Vinculada
+            </label>
+            <select
+              value={form.instituicao_id}
+              onChange={(e) => setForm({ ...form, instituicao_id: e.target.value })}
+              className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg px-3 py-2 text-xs font-semibold text-white uppercase focus:outline-none focus:border-qth-orange"
+            >
+              <option value="">PADRÃO / SEM VÍNCULO</option>
+              {instituicoes.map((inst) => (
+                <option key={inst.id} value={inst.id}>
+                  {(inst.sigla ? `${inst.sigla} - ` : '') + inst.nome}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-slate-300 mb-1 uppercase">
               KM Atual da Placa
             </label>
             <input
@@ -487,11 +542,11 @@ export default function PainelFrota({ perfil }) {
             required
           />
 
-          <div className="flex items-end">
+          <div className="sm:col-span-2 lg:col-span-4 flex justify-end pt-1">
             <button
               type="submit"
               disabled={salvando}
-              className="w-full bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold py-2 px-3 rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              className="w-full sm:w-auto bg-qth-green hover:bg-green-700 disabled:opacity-50 text-white font-bold py-2 px-5 rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
             >
               {editandoId ? <Save className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
               {salvando ? 'SALVANDO...' : editandoId ? 'SALVAR ALTERAÇÕES' : 'CADASTRAR VIATURA'}
@@ -515,7 +570,7 @@ export default function PainelFrota({ perfil }) {
               type="text"
               value={buscaTexto}
               onChange={(e) => setBuscaTexto(e.target.value.toUpperCase())}
-              placeholder="PESQUISAR POR PREFIXO, PLACA, CIDADE, UF, TIPO OU KM..."
+              placeholder="PESQUISAR POR PREFIXO, PLACA, INSTITUIÇÃO, CIDADE, UF, TIPO OU KM..."
               className="w-full bg-qth-bg/80 border border-slate-600 rounded-lg pl-9 pr-8 py-2 text-xs font-semibold text-white placeholder-slate-500 uppercase focus:outline-none focus:border-qth-orange"
             />
             {buscaTexto && (
@@ -573,45 +628,53 @@ export default function PainelFrota({ perfil }) {
         </div>
 
         {/* Filtros Específicos */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
-          <SelectPesquisavel
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2.5">
+          <FiltroMultiSelecao
             label="Status"
-            opcoes={['TODOS', ...STATUS_VTR]}
-            valor={filtroStatus}
-            onChange={setFiltroStatus}
-            placeholder="TODOS"
+            opcoes={STATUS_VTR}
+            valores={filtroStatuses}
+            onChange={setFiltroStatuses}
+            placeholderVazio="TODOS"
           />
 
-          <SelectPesquisavel
+          <FiltroMultiSelecao
             label="Tipo"
-            opcoes={['TODOS', ...TIPOS_VTR]}
-            valor={filtroTipo}
-            onChange={setFiltroTipo}
-            placeholder="TODOS"
+            opcoes={TIPOS_VTR}
+            valores={filtroTipos}
+            onChange={setFiltroTipos}
+            placeholderVazio="TODOS"
           />
 
-          <SelectPesquisavel
+          <FiltroMultiSelecao
+            label="Instituição"
+            opcoes={opcoesInstituicoesFiltro}
+            valores={filtroInstituicoes}
+            onChange={setFiltroInstituicoes}
+            placeholderVazio="TODAS"
+          />
+
+          <FiltroMultiSelecao
             label="Cidade / Base"
             opcoes={opcoesCidadesFiltro}
-            valor={filtroCidade}
-            onChange={setFiltroCidade}
-            placeholder="TODAS"
+            valores={filtroCidades}
+            onChange={setFiltroCidades}
+            placeholderVazio="TODAS"
           />
 
-          <SelectPesquisavel
+          <FiltroMultiSelecao
             label="UF"
             opcoes={opcoesEstadosFiltro}
-            valor={filtroEstado}
-            onChange={setFiltroEstado}
-            placeholder="TODAS"
+            valores={filtroEstados}
+            onChange={setFiltroEstados}
+            placeholderVazio="TODAS"
           />
 
-          <SelectPesquisavel
+          <FiltroMultiSelecao
             label="Vínculo de Placa"
-            opcoes={['TODAS', 'COM PLACA VINCULADA', 'SEM PLACA VINCULADA']}
-            valor={filtroVinculoPlaca}
-            onChange={setFiltroVinculoPlaca}
-            placeholder="TODAS"
+            opcoes={['COM PLACA VINCULADA', 'SEM PLACA VINCULADA']}
+            valores={filtroVinculosPlaca}
+            onChange={setFiltroVinculosPlaca}
+            placeholderVazio="TODAS"
           />
         </div>
       </div>
@@ -639,6 +702,7 @@ export default function PainelFrota({ perfil }) {
           {viaturasFiltradas.map((vtr) => {
             const placaExibicao = vtr.veiculo?.placa || vtr.placa
             const kmExibicao = vtr.veiculo?.km_atual || vtr.km_atual || '0'
+            const nomeInstituicao = mapaInstituicoes[vtr.instituicao_id] || ''
 
             return (
               <div
@@ -647,11 +711,17 @@ export default function PainelFrota({ perfil }) {
               >
                 <div className="flex items-start justify-between gap-2">
                   <div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-base font-extrabold text-white">{vtr.prefixo}</span>
                       <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-700 text-slate-200">
                         {vtr.tipo}
                       </span>
+                      {nomeInstituicao && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-900/50 text-sky-300 border border-sky-500/40 flex items-center gap-1">
+                          <Building2 className="w-2.5 h-2.5" />
+                          {nomeInstituicao}
+                        </span>
+                      )}
                     </div>
                     <p className="text-xs text-slate-400 mt-0.5">
                       PLACA: <strong className="text-slate-200">{placaExibicao}</strong> • {vtr.cidade || vtr.base_cidade} - {vtr.estado}
@@ -677,7 +747,7 @@ export default function PainelFrota({ perfil }) {
                     <button
                       onClick={() => iniciarEdicao(vtr)}
                       className="p-1.5 rounded-lg bg-qth-blue/20 hover:bg-qth-blue text-blue-300 hover:text-white transition-colors cursor-pointer"
-                      title="Trocar Placa / Editar KM / Status"
+                      title="Trocar Placa / Editar KM / Status / Instituição"
                     >
                       <Edit3 className="w-3.5 h-3.5" />
                     </button>

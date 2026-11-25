@@ -6,11 +6,57 @@ import {
     ClipboardList,
     Lock,
     Navigation,
+    Users,
+    Building2,
 } from 'lucide-react'
 import { normalizarPacientesVtr, construirUrlRota, obterMetaPrioridade, formatarEnderecoOcorrencia } from '../utils/painelCentralHelpers'
 import AbaTarm from './AbaTarm'
 import AbaRegulador from './AbaRegulador'
 import AbaRadioOperador from './AbaRadioOperador'
+
+function normalizarListaTripulacao(raw) {
+    if (Array.isArray(raw)) {
+        return Array.from(
+            new Set(
+                raw
+                    .map((item) => String(item || '').trim().toUpperCase())
+                    .filter(Boolean)
+            )
+        )
+    }
+    if (typeof raw === 'string' && raw.trim()) {
+        return Array.from(
+            new Set(
+                raw
+                    .split(/[,;|]+/)
+                    .map((item) => item.trim().toUpperCase())
+                    .filter(Boolean)
+            )
+        )
+    }
+    return []
+}
+
+function formatarTripulacaoResumo(trip) {
+    if (!trip || typeof trip !== 'object') return []
+    const itens = []
+    if (trip.condutor) itens.push(`CONDUTOR: ${String(trip.condutor).toUpperCase()}`)
+    if (trip.medico) itens.push(`MÉDICO: ${String(trip.medico).toUpperCase()}`)
+    if (trip.enfermeiro) itens.push(`ENFERMEIRO: ${String(trip.enfermeiro).toUpperCase()}`)
+    if (trip.tecnico) itens.push(`TÉCNICO: ${String(trip.tecnico).toUpperCase()}`)
+
+    const estagios = normalizarListaTripulacao(trip.estagios || trip.estagio)
+    if (estagios.length > 0) {
+        itens.push(`ESTÁGIO OPERACIONAL: ${estagios.join(', ')}`)
+    }
+
+    const alunos = normalizarListaTripulacao(trip.alunos || trip.aluno)
+    if (alunos.length > 0) {
+        itens.push(`ALUNO: ${alunos.join(', ')}`)
+    }
+
+    return itens
+}
 
 export default function ModalOcorrencia({
     ocorrenciaSelecionada,
@@ -38,6 +84,9 @@ export default function ModalOcorrencia({
     empenhosDaOcorrencia,
     evolucoesDaOcorrencia,
     viaturas,
+    remanejamentos = [],
+    plantoesAtivos = [],
+    mapaInstituicoes = {},
     rascunhosVtr,
     novoPacientePorVtr,
     setNovoPacientePorVtr,
@@ -71,6 +120,8 @@ export default function ModalOcorrencia({
     handleEmpenharViatura,
     handleAtualizarStatusEmpenho,
     handleDesvincularEmpenho,
+    handleSolicitarRemanejamento,
+    handleCancelarRemanejamento,
     alterarHorarioEStatusVtr,
     horaAtualHhMm,
     handleSalvarHorariosVtr,
@@ -82,6 +133,25 @@ export default function ModalOcorrencia({
         return null
     }
 
+    const nomeConsorcioOc = mapaInstituicoes[ocorrenciaSelecionada.instituicao_id] || ''
+
+    function obterPlantaoDoEmpenho(emp) {
+        if (!Array.isArray(plantoesAtivos) || plantoesAtivos.length === 0) return null
+        if (emp?.plantao_id) {
+            const porId = plantoesAtivos.find((p) => p.id === emp.plantao_id)
+            if (porId) return porId
+        }
+        return (
+            plantoesAtivos.find(
+                (p) =>
+                    (emp?.viatura_id && p.viatura_id === emp.viatura_id) ||
+                    (emp?.prefixo &&
+                        String(p.prefixo || '').trim().toUpperCase() ===
+                        String(emp.prefixo || '').trim().toUpperCase())
+            ) || null
+        )
+    }
+
     return (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
             <div className="bg-qth-card border border-slate-700 rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden shadow-2xl">
@@ -91,6 +161,12 @@ export default function ModalOcorrencia({
                             <span className="text-base font-extrabold text-white uppercase">
                                 OCORRÊNCIA #{ocorrenciaSelecionada.numero_ocorrencia || 'S/N'}
                             </span>
+                            {nomeConsorcioOc && (
+                                <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-sky-950/70 text-sky-300 border border-sky-500/40 uppercase flex items-center gap-1">
+                                    <Building2 className="w-3 h-3" />
+                                    {nomeConsorcioOc}
+                                </span>
+                            )}
                             <span
                                 className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border uppercase ${obterMetaPrioridade(ocorrenciaSelecionada.prioridade).badge
                                     }`}
@@ -261,6 +337,48 @@ export default function ModalOcorrencia({
                                 </div>
                             </div>
 
+                            {/* Tripulação por Viatura Empenhada (Somente Leitura) */}
+                            {empenhosDaOcorrencia.length > 0 && (
+                                <div className="bg-qth-bg/70 border border-slate-700/70 rounded-xl p-3 space-y-2.5">
+                                    <h4 className="text-xs font-extrabold text-white uppercase flex items-center gap-1.5">
+                                        <Users className="w-3.5 h-3.5 text-qth-orange" />
+                                        Tripulação por Recurso Empenhado (Somente Leitura)
+                                    </h4>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                                        {empenhosDaOcorrencia.map((emp) => {
+                                            const pl = obterPlantaoDoEmpenho(emp)
+                                            const itensTrip = formatarTripulacaoResumo(pl?.tripulacao)
+                                            return (
+                                                <div
+                                                    key={emp.id}
+                                                    className="bg-qth-card border border-slate-700 rounded-lg p-2.5 space-y-1"
+                                                >
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <span className="text-xs font-extrabold text-white uppercase">
+                                                            {emp.prefixo}
+                                                        </span>
+                                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-qth-orange border border-slate-600 uppercase">
+                                                            {emp.status_empenho}
+                                                        </span>
+                                                    </div>
+                                                    {itensTrip.length === 0 ? (
+                                                        <p className="text-[11px] text-slate-400">
+                                                            Tripulação não informada para este recurso.
+                                                        </p>
+                                                    ) : (
+                                                        <ul className="text-[11px] text-slate-200 space-y-0.5">
+                                                            {itensTrip.map((linha) => (
+                                                                <li key={linha}>{linha}</li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                </div>
+                                            )
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+
                             {empenhosDaOcorrencia.some(
                                 (e) => normalizarPacientesVtr(e.pacientes_detalhes).length > 0
                             ) && (
@@ -425,6 +543,9 @@ export default function ModalOcorrencia({
                             ocorrenciaSelecionada={ocorrenciaSelecionada}
                             empenhosDaOcorrencia={empenhosDaOcorrencia}
                             viaturas={viaturas}
+                            remanejamentos={remanejamentos}
+                            plantoesAtivos={plantoesAtivos}
+                            mapaInstituicoes={mapaInstituicoes}
                             editRadio={editRadio}
                             setEditRadio={setEditRadio}
                             viaturaParaEmpenhar={viaturaParaEmpenhar}
@@ -438,6 +559,8 @@ export default function ModalOcorrencia({
                             handleEmpenharViatura={handleEmpenharViatura}
                             handleAtualizarStatusEmpenho={handleAtualizarStatusEmpenho}
                             handleDesvincularEmpenho={handleDesvincularEmpenho}
+                            handleSolicitarRemanejamento={handleSolicitarRemanejamento}
+                            handleCancelarRemanejamento={handleCancelarRemanejamento}
                             alterarHorarioEStatusVtr={alterarHorarioEStatusVtr}
                             horaAtualHhMm={horaAtualHhMm}
                             handleSalvarHorariosVtr={handleSalvarHorariosVtr}
